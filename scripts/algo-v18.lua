@@ -83,8 +83,10 @@ end
 
 function M.compute(points, reaches)
   local n = #points
-  if n < 2 then return {}, {}, {} end
+  local stats = {}
+  if n < 2 then return {}, {}, {}, stats end
 
+  stats.t_setup = game.create_profiler()
   -- pos_to_idx: round positions for symmetric-target lookup
   local pos_to_idx = {}
   for i = 1, n do
@@ -114,6 +116,7 @@ function M.compute(points, reaches)
     if not cell then cell = {}; row[cy] = cell end
     cell[#cell + 1] = i
   end
+  stats.t_setup.stop()
 
   -- Returns points strictly between i and j on the segment (sorted by t).
   local function points_on_segment_strict(i, j)
@@ -484,9 +487,19 @@ function M.compute(points, reaches)
   -- with prior primaries OR expansions; expansion is cascading and skips
   -- overlap check (only deduped by quad_key).
   local function detect_phased(point_indices_set)
+    stats.t_enumerate = game.create_profiler()
     local candidates = enumerate_parls(point_indices_set)
-    if #candidates == 0 then return end
+    stats.t_enumerate.stop()
+    stats.candidates = #candidates
+    if #candidates == 0 then
+      stats.t_phase_loop = game.create_profiler()
+      stats.t_phase_loop.stop()
+      stats.t_iso = game.create_profiler()
+      stats.t_iso.stop()
+      return
+    end
 
+    stats.t_phase_loop = game.create_profiler()
     local phases = { {}, {}, {}, {} }
     for _, P in ipairs(candidates) do
       local ph = parl_phase(P) + 1
@@ -531,7 +544,11 @@ function M.compute(points, reaches)
     for _, P in ipairs(expansion_parls) do
       accepted_parls[#accepted_parls + 1] = P
     end
+    stats.primary = #primary_parls
+    stats.expansion = #expansion_parls
+    stats.t_phase_loop.stop()
 
+    stats.t_iso = game.create_profiler()
     for _, P in ipairs(primary_parls) do
       for _, T in ipairs(try_isosceles_split(P)) do
         local k = tri_key(T[1], T[2], T[3])
@@ -550,6 +567,7 @@ function M.compute(points, reaches)
         end
       end
     end
+    stats.t_iso.stop()
   end
 
   local all_set = {}
@@ -658,6 +676,7 @@ function M.compute(points, reaches)
     return true
   end
 
+  stats.t_pattern_edges = game.create_profiler()
   -- Parallelogram chain edges (no cross check — accepted P's are non-overlapping
   -- by SAT, so chain edges don't cross each other).
   for _, P in ipairs(accepted_parls) do
@@ -675,11 +694,13 @@ function M.compute(points, reaches)
     add_edge_checked(b, c)
     add_edge_checked(a, c)
   end
+  stats.t_pattern_edges.stop()
 
   -- MST closure: connect remaining components by Kruskal, shortest first.
   -- Spatial-bucket the candidate enumeration: cell_size == max_reach, so any
   -- valid pair lies within the box of cells around pole i, giving O(n × k)
   -- instead of O(n²).
+  stats.t_mst_cand = game.create_profiler()
   local mst_candidates = {}
   for i = 1, n do
     local pi = points[i]
@@ -709,14 +730,18 @@ function M.compute(points, reaches)
     end
   end
   table.sort(mst_candidates, function(a, b) return a.d < b.d end)
+  stats.mst_cand_count = #mst_candidates
+  stats.t_mst_cand.stop()
 
+  stats.t_mst_closure = game.create_profiler()
   for _, e in ipairs(mst_candidates) do
     if find(e.i) ~= find(e.j) then
       add_edge_checked(e.i, e.j)
     end
   end
+  stats.t_mst_closure.stop()
 
-  return edges, accepted_parls, accepted_iso_tris
+  return edges, accepted_parls, accepted_iso_tris, stats
 end
 
 return M

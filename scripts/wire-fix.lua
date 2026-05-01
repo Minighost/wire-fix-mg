@@ -86,7 +86,7 @@ function M.run(player_index, entities)
     points[i] = { x = p.position.x, y = p.position.y }
     reaches[i] = p.prototype.get_max_wire_distance(p.quality)
   end
-  local v18_edges, v18_parls, v18_iso = algo_v18.compute(points, reaches)
+  local v18_edges, v18_parls, v18_iso, v18_stats = algo_v18.compute(points, reaches)
   p_v18.stop()
 
   -- Phase 3: build wanted set keyed by pair_key(unit_number).
@@ -137,10 +137,21 @@ function M.run(player_index, entities)
     for _ in pairs(internal_pairs) do internal_count = internal_count + 1 end
     player.print({"", "[Wire Fix v0.2/v18] total: ", p_total})
     player.print(string.format(
-      "  poles=%d  internal_existing=%d  edges_wanted=%d  parls=%d  iso=%d  api: disconnect=%d connect=%d",
-      n, internal_count, #v18_edges, #v18_parls, #v18_iso,
+      "  poles=%d  internal_existing=%d  edges_wanted=%d  candidates=%d  primary=%d  expansion=%d  iso=%d  mst_cand=%d  api: disconnect=%d connect=%d",
+      n, internal_count, #v18_edges,
+      v18_stats.candidates or 0, v18_stats.primary or 0, v18_stats.expansion or 0,
+      #v18_iso, v18_stats.mst_cand_count or 0,
       disconnect_calls, connect_calls))
     player.print({"", "  phase1=", p_phase1, "  v18=", p_v18, "  diff=", p_diff})
+    player.print({"",
+      "  setup=", v18_stats.t_setup,
+      "  enumerate=", v18_stats.t_enumerate,
+      "  phase_loop=", v18_stats.t_phase_loop,
+      "  iso=", v18_stats.t_iso})
+    player.print({"",
+      "  pattern_edges=", v18_stats.t_pattern_edges,
+      "  mst_cand=", v18_stats.t_mst_cand,
+      "  mst_closure=", v18_stats.t_mst_closure})
   end
 end
 
