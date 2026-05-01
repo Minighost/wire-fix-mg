@@ -563,6 +563,10 @@ function M.compute(points, reaches)
   local edges = {}
   local edge_set = {}
   local edge_segs = {}
+  -- Spatial bucket for the planar edge graph. Edge length is bounded by
+  -- max_reach == cell_size, so each edge touches at most 4 cells; the
+  -- intersection check only iterates edges in the new edge's bbox cells.
+  local edge_bucket = {}
 
   local parent = {}
   for i = 1, n do parent[i] = i end
@@ -580,6 +584,54 @@ function M.compute(points, reaches)
     return false
   end
 
+  local function bbox_cells(x1, y1, x2, y2)
+    local minx, maxx = x1, x2
+    if minx > maxx then minx, maxx = maxx, minx end
+    local miny, maxy = y1, y2
+    if miny > maxy then miny, maxy = maxy, miny end
+    return math.floor(minx / cell_size), math.floor(maxx / cell_size),
+           math.floor(miny / cell_size), math.floor(maxy / cell_size)
+  end
+
+  local function bucket_add_edge(idx, x1, y1, x2, y2)
+    local cx_min, cx_max, cy_min, cy_max = bbox_cells(x1, y1, x2, y2)
+    for cx = cx_min, cx_max do
+      local row = edge_bucket[cx]
+      if not row then row = {}; edge_bucket[cx] = row end
+      for cy = cy_min, cy_max do
+        local cell = row[cy]
+        if not cell then cell = {}; row[cy] = cell end
+        cell[#cell + 1] = idx
+      end
+    end
+  end
+
+  local function bucket_any_intersect(x1, y1, x2, y2)
+    local cx_min, cx_max, cy_min, cy_max = bbox_cells(x1, y1, x2, y2)
+    local seen = {}
+    for cx = cx_min, cx_max do
+      local row = edge_bucket[cx]
+      if row then
+        for cy = cy_min, cy_max do
+          local cell = row[cy]
+          if cell then
+            for _, idx in ipairs(cell) do
+              if not seen[idx] then
+                seen[idx] = true
+                local old = edge_segs[idx]
+                if segs_intersect(x1, y1, x2, y2,
+                                  old[1], old[2], old[3], old[4]) then
+                  return true
+                end
+              end
+            end
+          end
+        end
+      end
+    end
+    return false
+  end
+
   local function add_edge_unchecked(a, b)
     local k = edge_key(a, b)
     if edge_set[k] then return end
@@ -587,6 +639,7 @@ function M.compute(points, reaches)
     edges[#edges + 1] = { a, b }
     local pa, pb = points[a], points[b]
     edge_segs[#edge_segs + 1] = { pa.x, pa.y, pb.x, pb.y }
+    bucket_add_edge(#edge_segs, pa.x, pa.y, pb.x, pb.y)
     union(a, b)
   end
 
@@ -594,15 +647,13 @@ function M.compute(points, reaches)
     local k = edge_key(a, b)
     if edge_set[k] then return false end
     local pa, pb = points[a], points[b]
-    for _, old in ipairs(edge_segs) do
-      if segs_intersect(pa.x, pa.y, pb.x, pb.y,
-                        old[1], old[2], old[3], old[4]) then
-        return false
-      end
+    if bucket_any_intersect(pa.x, pa.y, pb.x, pb.y) then
+      return false
     end
     edge_set[k] = true
     edges[#edges + 1] = { a, b }
     edge_segs[#edge_segs + 1] = { pa.x, pa.y, pb.x, pb.y }
+    bucket_add_edge(#edge_segs, pa.x, pa.y, pb.x, pb.y)
     union(a, b)
     return true
   end
