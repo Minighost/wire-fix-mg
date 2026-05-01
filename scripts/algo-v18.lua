@@ -6,7 +6,9 @@
 --     point_in_or_on_quad, points_in_or_on_quad) was not ported — those
 --     functions are defined but never reached from detect_phased's flow.
 --   - Indices are 1-based throughout (Lua convention).
---   - vec_round / edge_key / quad_key use string keys (Lua table lookup).
+--   - vec_round_xy returns two ints for use as 2-level table keys (no string
+--     allocation in the hot midpoint-pair loop). edge_key / quad_key still use
+--     string keys (called rarely enough that allocation isn't measurable).
 --
 -- Public API:
 --   M.compute(points, reaches) -> edges, parls, iso_tris
@@ -24,7 +26,9 @@ local EPS = 1e-9
 local EPS_GEOM = 1e-6
 local ROUND_SCALE = 10000  -- 4-decimal precision
 
-local function vec_round(x, y)
+-- Round (x, y) to fixed-point integers; returned as a (rx, ry) pair so
+-- callers can use them as 2-level table keys without string allocation.
+local function vec_round_xy(x, y)
   local rx
   if x >= 0 then rx = math.floor(x * ROUND_SCALE + 0.5)
   else rx = -math.floor(-x * ROUND_SCALE + 0.5)
@@ -33,7 +37,7 @@ local function vec_round(x, y)
   if y >= 0 then ry = math.floor(y * ROUND_SCALE + 0.5)
   else ry = -math.floor(-y * ROUND_SCALE + 0.5)
   end
-  return rx .. ":" .. ry
+  return rx, ry
 end
 
 local function cross_2d(ax, ay, bx, by)
@@ -87,10 +91,14 @@ function M.compute(points, reaches)
   if n < 2 then return {}, {}, {}, stats end
 
   stats.t_setup = game.create_profiler()
-  -- pos_to_idx: round positions for symmetric-target lookup
+  -- pos_to_idx: round positions for symmetric-target lookup. 2-level int
+  -- table avoids per-build string allocation; callers index pos_to_idx[rx][ry].
   local pos_to_idx = {}
   for i = 1, n do
-    pos_to_idx[vec_round(points[i].x, points[i].y)] = i
+    local rx, ry = vec_round_xy(points[i].x, points[i].y)
+    local row = pos_to_idx[rx]
+    if not row then row = {}; pos_to_idx[rx] = row end
+    row[ry] = i
   end
 
   -- Per-pair reach helper (Factorio rule: pair reach = min of endpoints).
@@ -182,44 +190,65 @@ function M.compute(points, reaches)
 
   -- SAT-based parallelogram-on-parallelogram overlap test.
   -- Boundary touch (separation distance == 0) is treated as separated.
+  -- Hot-path SAT with no per-call allocation: corners are dereferenced into
+  -- locals, the four axes are computed inline, and projections compare via
+  -- chained min/max instead of an axes table + ipairs.
   local function quads_overlap(P_corners, Q_corners)
-    local P_pts = {
-      points[P_corners[1]], points[P_corners[2]],
-      points[P_corners[3]], points[P_corners[4]],
-    }
-    local Q_pts = {
-      points[Q_corners[1]], points[Q_corners[2]],
-      points[Q_corners[3]], points[Q_corners[4]],
-    }
-    -- 4 axes total — 2 unique side-normals per parallelogram.
-    local axes = {}
-    for poly_idx = 1, 2 do
-      local poly = (poly_idx == 1) and P_pts or Q_pts
-      for i = 1, 2 do
-        local pa = poly[i]
-        local pb = poly[i + 1]
-        axes[#axes + 1] = { x = pb.y - pa.y, y = -(pb.x - pa.x) }
+    local pp1 = points[P_corners[1]]
+    local pp2 = points[P_corners[2]]
+    local pp3 = points[P_corners[3]]
+    local pp4 = points[P_corners[4]]
+    local qp1 = points[Q_corners[1]]
+    local qp2 = points[Q_corners[2]]
+    local qp3 = points[Q_corners[3]]
+    local qp4 = points[Q_corners[4]]
+    local pp1x, pp1y = pp1.x, pp1.y
+    local pp2x, pp2y = pp2.x, pp2.y
+    local pp3x, pp3y = pp3.x, pp3.y
+    local pp4x, pp4y = pp4.x, pp4.y
+    local qp1x, qp1y = qp1.x, qp1.y
+    local qp2x, qp2y = qp2.x, qp2.y
+    local qp3x, qp3y = qp3.x, qp3.y
+    local qp4x, qp4y = qp4.x, qp4.y
+
+    for axis_idx = 1, 4 do
+      local ax, ay
+      if axis_idx == 1 then
+        ax = pp2y - pp1y; ay = pp1x - pp2x
+      elseif axis_idx == 2 then
+        ax = pp3y - pp2y; ay = pp2x - pp3x
+      elseif axis_idx == 3 then
+        ax = qp2y - qp1y; ay = qp1x - qp2x
+      else
+        ax = qp3y - qp2y; ay = qp2x - qp3x
       end
-    end
-    for _, axis in ipairs(axes) do
-      local ax, ay = axis.x, axis.y
       if ax * ax + ay * ay >= 1e-18 then
-        local p_min, p_max = math.huge, -math.huge
-        for ci = 1, 4 do
-          local pt = P_pts[ci]
-          local proj = pt.x * ax + pt.y * ay
-          if proj < p_min then p_min = proj end
-          if proj > p_max then p_max = proj end
-        end
-        local q_min, q_max = math.huge, -math.huge
-        for ci = 1, 4 do
-          local pt = Q_pts[ci]
-          local proj = pt.x * ax + pt.y * ay
-          if proj < q_min then q_min = proj end
-          if proj > q_max then q_max = proj end
-        end
-        if p_max < q_min + EPS or q_max < p_min + EPS then
-          return false  -- separating axis found
+        local p1 = pp1x * ax + pp1y * ay
+        local p2 = pp2x * ax + pp2y * ay
+        local p3 = pp3x * ax + pp3y * ay
+        local p4 = pp4x * ax + pp4y * ay
+        local pmin, pmax = p1, p1
+        if p2 < pmin then pmin = p2 end
+        if p2 > pmax then pmax = p2 end
+        if p3 < pmin then pmin = p3 end
+        if p3 > pmax then pmax = p3 end
+        if p4 < pmin then pmin = p4 end
+        if p4 > pmax then pmax = p4 end
+
+        local q1 = qp1x * ax + qp1y * ay
+        local q2 = qp2x * ax + qp2y * ay
+        local q3 = qp3x * ax + qp3y * ay
+        local q4 = qp4x * ax + qp4y * ay
+        local qmin, qmax = q1, q1
+        if q2 < qmin then qmin = q2 end
+        if q2 > qmax then qmax = q2 end
+        if q3 < qmin then qmin = q3 end
+        if q3 > qmax then qmax = q3 end
+        if q4 < qmin then qmin = q4 end
+        if q4 > qmax then qmax = q4 end
+
+        if pmax < qmin + EPS or qmax < pmin + EPS then
+          return false
         end
       end
     end
@@ -236,6 +265,9 @@ function M.compute(points, reaches)
     local m = #pts_idx
     if m < 4 then return {} end
 
+    -- Hot loop: O(n²) midpoint pairs. 2-level int table avoids per-pair
+    -- string allocation that vec_round.."_"..vec_round used to incur, and
+    -- the rounding is inlined to drop function-call overhead.
     local mid_groups = {}
     for ii = 1, m do
       local i = pts_idx[ii]
@@ -244,60 +276,71 @@ function M.compute(points, reaches)
         local j = pts_idx[jj]
         local mx = pix + points[j].x
         local my = piy + points[j].y
-        local k = vec_round(mx, my)
-        local g = mid_groups[k]
-        if not g then g = {}; mid_groups[k] = g end
+        local rx
+        if mx >= 0 then rx = math.floor(mx * ROUND_SCALE + 0.5)
+        else rx = -math.floor(-mx * ROUND_SCALE + 0.5)
+        end
+        local ry
+        if my >= 0 then ry = math.floor(my * ROUND_SCALE + 0.5)
+        else ry = -math.floor(-my * ROUND_SCALE + 0.5)
+        end
+        local row = mid_groups[rx]
+        if not row then row = {}; mid_groups[rx] = row end
+        local g = row[ry]
+        if not g then g = {}; row[ry] = g end
         g[#g + 1] = { i, j }
       end
     end
 
     local candidates = {}
-    for _, grp in pairs(mid_groups) do
-      local glen = #grp
-      if glen >= 2 then
-        for pi = 1, glen do
-          local a, b = grp[pi][1], grp[pi][2]
-          for pj = pi + 1, glen do
-            local c, d = grp[pj][1], grp[pj][2]
-            if a ~= c and a ~= d and b ~= c and b ~= d then
-              local i, j, k = a, c, d  -- l = b
-              local v_a_x = points[j].x - points[i].x
-              local v_a_y = points[j].y - points[i].y
-              local v_b_x = points[k].x - points[i].x
-              local v_b_y = points[k].y - points[i].y
-              local la2 = v_a_x * v_a_x + v_a_y * v_a_y
-              local lb2 = v_b_x * v_b_x + v_b_y * v_b_y
-              if la2 >= 1e-18 and lb2 >= 1e-18 then
-                local dotv = v_a_x * v_b_x + v_a_y * v_b_y
-                if 4 * dotv * dotv <= la2 * lb2 then
-                  local corners_ccw
-                  if cross_2d(v_a_x, v_a_y, v_b_x, v_b_y) > 0 then
-                    corners_ccw = { i, j, b, k }
-                  else
-                    corners_ccw = { i, k, b, j }
-                  end
-                  local chains = {}
-                  local ok = true
-                  for ci = 1, 4 do
-                    local ea = corners_ccw[ci]
-                    local eb = corners_ccw[(ci % 4) + 1]
-                    local ch = make_chain(ea, eb)
-                    if ch == nil then ok = false; break end
-                    chains[ci] = ch
-                  end
-                  if ok then
-                    local p1 = points[corners_ccw[1]]
-                    local p2 = points[corners_ccw[2]]
-                    local p4 = points[corners_ccw[4]]
-                    local va_x = p2.x - p1.x
-                    local va_y = p2.y - p1.y
-                    local vb_x = p4.x - p1.x
-                    local vb_y = p4.y - p1.y
-                    candidates[#candidates + 1] = {
-                      corners = corners_ccw,
-                      chains = chains,
-                      area = math.abs(cross_2d(va_x, va_y, vb_x, vb_y)),
-                    }
+    for _, ry_row in pairs(mid_groups) do
+      for _, grp in pairs(ry_row) do
+        local glen = #grp
+        if glen >= 2 then
+          for pi = 1, glen do
+            local a, b = grp[pi][1], grp[pi][2]
+            for pj = pi + 1, glen do
+              local c, d = grp[pj][1], grp[pj][2]
+              if a ~= c and a ~= d and b ~= c and b ~= d then
+                local i, j, k = a, c, d  -- l = b
+                local v_a_x = points[j].x - points[i].x
+                local v_a_y = points[j].y - points[i].y
+                local v_b_x = points[k].x - points[i].x
+                local v_b_y = points[k].y - points[i].y
+                local la2 = v_a_x * v_a_x + v_a_y * v_a_y
+                local lb2 = v_b_x * v_b_x + v_b_y * v_b_y
+                if la2 >= 1e-18 and lb2 >= 1e-18 then
+                  local dotv = v_a_x * v_b_x + v_a_y * v_b_y
+                  if 4 * dotv * dotv <= la2 * lb2 then
+                    local corners_ccw
+                    if cross_2d(v_a_x, v_a_y, v_b_x, v_b_y) > 0 then
+                      corners_ccw = { i, j, b, k }
+                    else
+                      corners_ccw = { i, k, b, j }
+                    end
+                    local chains = {}
+                    local ok = true
+                    for ci = 1, 4 do
+                      local ea = corners_ccw[ci]
+                      local eb = corners_ccw[(ci % 4) + 1]
+                      local ch = make_chain(ea, eb)
+                      if ch == nil then ok = false; break end
+                      chains[ci] = ch
+                    end
+                    if ok then
+                      local p1 = points[corners_ccw[1]]
+                      local p2 = points[corners_ccw[2]]
+                      local p4 = points[corners_ccw[4]]
+                      local va_x = p2.x - p1.x
+                      local va_y = p2.y - p1.y
+                      local vb_x = p4.x - p1.x
+                      local vb_y = p4.y - p1.y
+                      candidates[#candidates + 1] = {
+                        corners = corners_ccw,
+                        chains = chains,
+                        area = math.abs(cross_2d(va_x, va_y, vb_x, vb_y)),
+                      }
+                    end
                   end
                 end
               end
@@ -359,8 +402,9 @@ function M.compute(points, reaches)
         local ok = true
         for ci = 1, 4 do
           local cp = points[cur.corners[ci]]
-          local key = vec_round(cp.x + dir.x, cp.y + dir.y)
-          local idx = pos_to_idx[key]
+          local rx, ry = vec_round_xy(cp.x + dir.x, cp.y + dir.y)
+          local row = pos_to_idx[rx]
+          local idx = row and row[ry]
           if not idx then ok = false; break end
           new_corners[ci] = idx
         end
@@ -459,8 +503,9 @@ function M.compute(points, reaches)
           local oa, ob, op = points[out_v_a], points[out_v_b], points[opp]
           local mx = oa.x + ob.x - op.x
           local my = oa.y + ob.y - op.y
-          local key = vec_round(mx, my)
-          local X = pos_to_idx[key]
+          local rx, ry = vec_round_xy(mx, my)
+          local row = pos_to_idx[rx]
+          local X = row and row[ry]
           if X and X ~= out_v_a and X ~= out_v_b and X ~= opp then
             local px = points[X]
             local d_oa_X = dist(oa.x, oa.y, px.x, px.y)
