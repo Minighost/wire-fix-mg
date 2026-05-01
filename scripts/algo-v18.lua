@@ -9,9 +9,11 @@
 --   - vec_round / edge_key / quad_key use string keys (Lua table lookup).
 --
 -- Public API:
---   M.compute(points, max_reach) -> edges, parls, iso_tris
+--   M.compute(points, reaches) -> edges, parls, iso_tris
 --     points     : 1-indexed array of {x = number, y = number}
---     max_reach  : single max wire distance applied to every pair
+--     reaches    : 1-indexed array of per-pole max wire distance.
+--                  Pair-wise reach for any (i, j) is min(reaches[i], reaches[j]),
+--                  matching how the Factorio engine validates a copper wire.
 --     edges      : list of {i, j} (1-indexed pole indices)
 --     parls      : list of accepted parallelograms (for visualization)
 --     iso_tris   : list of accepted isosceles triangles {a, b, c}
@@ -79,7 +81,7 @@ local function segs_intersect(p1x, p1y, p2x, p2y, p3x, p3y, p4x, p4y)
   return false
 end
 
-function M.compute(points, max_reach)
+function M.compute(points, reaches)
   local n = #points
   if n < 2 then return {}, {}, {} end
 
@@ -89,8 +91,18 @@ function M.compute(points, max_reach)
     pos_to_idx[vec_round(points[i].x, points[i].y)] = i
   end
 
-  -- Spatial bucket (cell_size = max_reach so any reachable pair is at most
-  -- one cell away in each axis).
+  -- Per-pair reach helper (Factorio rule: pair reach = min of endpoints).
+  local function pair_reach(i, j)
+    local ri, rj = reaches[i], reaches[j]
+    return ri < rj and ri or rj
+  end
+
+  -- Spatial bucket sized by the max reach in the selection so cell queries
+  -- can never miss a within-reach pair, even for the largest poles.
+  local max_reach = 0
+  for i = 1, n do
+    if reaches[i] > max_reach then max_reach = reaches[i] end
+  end
   local cell_size = max_reach
   local point_bucket = {}
   for i = 1, n do
@@ -147,16 +159,18 @@ function M.compute(points, max_reach)
     return result
   end
 
-  -- Chain i -> mids -> j; nil if any sub-segment exceeds max_reach.
+  -- Chain i -> mids -> j; nil if any sub-segment exceeds its pair reach.
   local function make_chain(i, j)
     local mids = points_on_segment_strict(i, j)
     local chain = { i }
     for _, m in ipairs(mids) do chain[#chain + 1] = m.k end
     chain[#chain + 1] = j
     for ci = 1, #chain - 1 do
-      local pa = points[chain[ci]]
-      local pb = points[chain[ci + 1]]
-      if dist(pa.x, pa.y, pb.x, pb.y) > max_reach + 1e-9 then
+      local a = chain[ci]
+      local b = chain[ci + 1]
+      local pa = points[a]
+      local pb = points[b]
+      if dist(pa.x, pa.y, pb.x, pb.y) > pair_reach(a, b) + 1e-9 then
         return nil
       end
     end
@@ -449,7 +463,9 @@ function M.compute(points, max_reach)
             local d_oa_X = dist(oa.x, oa.y, px.x, px.y)
             local d_ob_X = dist(ob.x, ob.y, px.x, px.y)
             local d_oa_ob = dist(oa.x, oa.y, ob.x, ob.y)
-            if d_oa_X <= max_reach and d_ob_X <= max_reach and d_oa_ob <= max_reach then
+            if d_oa_X <= pair_reach(out_v_a, X)
+               and d_ob_X <= pair_reach(out_v_b, X)
+               and d_oa_ob <= pair_reach(out_v_a, out_v_b) then
               result[#result + 1] = { out_v_a, out_v_b, X }
             end
           end
@@ -616,7 +632,7 @@ function M.compute(points, max_reach)
     for j = i + 1, n do
       local pj = points[j]
       local d = dist(pi.x, pi.y, pj.x, pj.y)
-      if d <= max_reach then
+      if d <= pair_reach(i, j) then
         mst_candidates[#mst_candidates + 1] = { d = d, i = i, j = j }
       end
     end
@@ -626,6 +642,16 @@ function M.compute(points, max_reach)
   for _, e in ipairs(mst_candidates) do
     if find(e.i) ~= find(e.j) then
       add_edge_checked(e.i, e.j)
+    end
+  end
+
+  -- Connectivity safety net: if components remain separated because every
+  -- bridging candidate crossed a pattern edge, fall back to shortest-first
+  -- without the intersection check. Electrical connectivity beats avoiding
+  -- a wire crossing.
+  for _, e in ipairs(mst_candidates) do
+    if find(e.i) ~= find(e.j) then
+      add_edge_unchecked(e.i, e.j)
     end
   end
 

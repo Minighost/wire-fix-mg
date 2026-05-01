@@ -80,14 +80,13 @@ function M.run(player_index, entities)
   -- the cap is tracked for a follow-up.
   local p_v18 = game.create_profiler()
   local points = {}
-  local min_reach = math.huge
+  local reaches = {}
   for i = 1, n do
     local p = poles[i]
     points[i] = { x = p.position.x, y = p.position.y }
-    local r = p.prototype.get_max_wire_distance(p.quality)
-    if r < min_reach then min_reach = r end
+    reaches[i] = p.prototype.get_max_wire_distance(p.quality)
   end
-  local v18_edges, v18_parls, v18_iso = algo_v18.compute(points, min_reach)
+  local v18_edges, v18_parls, v18_iso = algo_v18.compute(points, reaches)
   p_v18.stop()
 
   -- Phase 3: build wanted set keyed by pair_key(unit_number).
