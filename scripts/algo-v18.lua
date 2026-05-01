@@ -626,14 +626,34 @@ function M.compute(points, reaches)
   end
 
   -- MST closure: connect remaining components by Kruskal, shortest first.
+  -- Spatial-bucket the candidate enumeration: cell_size == max_reach, so any
+  -- valid pair lies within the box of cells around pole i, giving O(n × k)
+  -- instead of O(n²).
   local mst_candidates = {}
   for i = 1, n do
     local pi = points[i]
-    for j = i + 1, n do
-      local pj = points[j]
-      local d = dist(pi.x, pi.y, pj.x, pj.y)
-      if d <= pair_reach(i, j) then
-        mst_candidates[#mst_candidates + 1] = { d = d, i = i, j = j }
+    local ri = reaches[i]
+    local cx_min = math.floor((pi.x - ri) / cell_size)
+    local cx_max = math.floor((pi.x + ri) / cell_size)
+    local cy_min = math.floor((pi.y - ri) / cell_size)
+    local cy_max = math.floor((pi.y + ri) / cell_size)
+    for cx = cx_min, cx_max do
+      local row = point_bucket[cx]
+      if row then
+        for cy = cy_min, cy_max do
+          local cell = row[cy]
+          if cell then
+            for _, j in ipairs(cell) do
+              if j > i then
+                local pj = points[j]
+                local d = dist(pi.x, pi.y, pj.x, pj.y)
+                if d <= pair_reach(i, j) then
+                  mst_candidates[#mst_candidates + 1] = { d = d, i = i, j = j }
+                end
+              end
+            end
+          end
+        end
       end
     end
   end
