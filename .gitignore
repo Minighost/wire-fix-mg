@@ -1,0 +1,22 @@
+# Build output
+dist/
+*.zip
+
+# Dev-only overrides
+config-local.lua
+
+# Editor / IDE
+.vscode/
+.idea/
+
+# OS metadata
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Python (icon generators)
+__pycache__/
+*.pyc
+
+# Legacy
+scripts/archive/

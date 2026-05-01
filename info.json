@@ -1,0 +1,9 @@
+{
+  "name": "wire-fix",
+  "version": "0.1.0",
+  "factorio_version": "2.0",
+  "title": "Wire Fix",
+  "author": "Chalgaro46",
+  "description": "Select an area to rebuild copper wire connections between electric poles by distance, preserving external connections.",
+  "dependencies": ["base"]
+}
