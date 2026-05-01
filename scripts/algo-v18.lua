@@ -645,16 +645,6 @@ function M.compute(points, reaches)
     end
   end
 
-  -- Connectivity safety net: if components remain separated because every
-  -- bridging candidate crossed a pattern edge, fall back to shortest-first
-  -- without the intersection check. Electrical connectivity beats avoiding
-  -- a wire crossing.
-  for _, e in ipairs(mst_candidates) do
-    if find(e.i) ~= find(e.j) then
-      add_edge_unchecked(e.i, e.j)
-    end
-  end
-
   return edges, accepted_parls, accepted_iso_tris
 end
 
