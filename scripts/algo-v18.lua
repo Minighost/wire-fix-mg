@@ -25,17 +25,20 @@ local M = {}
 local EPS = 1e-9
 local EPS_GEOM = 1e-6
 local ROUND_SCALE = 10000  -- 4-decimal precision
+local mfloor = math.floor
+local mabs = math.abs
+local msqrt = math.sqrt
 
 -- Round (x, y) to fixed-point integers; returned as a (rx, ry) pair so
 -- callers can use them as 2-level table keys without string allocation.
 local function vec_round_xy(x, y)
   local rx
-  if x >= 0 then rx = math.floor(x * ROUND_SCALE + 0.5)
-  else rx = -math.floor(-x * ROUND_SCALE + 0.5)
+  if x >= 0 then rx = mfloor(x * ROUND_SCALE + 0.5)
+  else rx = -mfloor(-x * ROUND_SCALE + 0.5)
   end
   local ry
-  if y >= 0 then ry = math.floor(y * ROUND_SCALE + 0.5)
-  else ry = -math.floor(-y * ROUND_SCALE + 0.5)
+  if y >= 0 then ry = mfloor(y * ROUND_SCALE + 0.5)
+  else ry = -mfloor(-y * ROUND_SCALE + 0.5)
   end
   return rx, ry
 end
@@ -47,7 +50,7 @@ end
 local function dist(ax, ay, bx, by)
   local dx = ax - bx
   local dy = ay - by
-  return math.sqrt(dx * dx + dy * dy)
+  return msqrt(dx * dx + dy * dy)
 end
 
 local function edge_key(i, j)
@@ -90,6 +93,11 @@ function M.compute(points, reaches)
   local stats = {}
   if n < 2 then return {}, {}, {}, stats end
 
+  -- Pack (i, j) pairs into a single int via i * K + j so the hot midpoint
+  -- loop can store pairs as ints in a flat array, dropping ~n² per-pair
+  -- {i, j} table allocations.
+  local K = n + 1
+
   stats.t_setup = game.create_profiler()
   -- pos_to_idx: round positions for symmetric-target lookup. 2-level int
   -- table avoids per-build string allocation; callers index pos_to_idx[rx][ry].
@@ -116,8 +124,8 @@ function M.compute(points, reaches)
   local cell_size = max_reach
   local point_bucket = {}
   for i = 1, n do
-    local cx = math.floor(points[i].x / cell_size)
-    local cy = math.floor(points[i].y / cell_size)
+    local cx = mfloor(points[i].x / cell_size)
+    local cy = mfloor(points[i].y / cell_size)
     local row = point_bucket[cx]
     if not row then row = {}; point_bucket[cx] = row end
     local cell = row[cy]
@@ -137,10 +145,10 @@ function M.compute(points, reaches)
     if minx > maxx then minx, maxx = maxx, minx end
     local miny, maxy = pa.y, pb.y
     if miny > maxy then miny, maxy = maxy, miny end
-    local cx1 = math.floor(minx / cell_size)
-    local cx2 = math.floor(maxx / cell_size)
-    local cy1 = math.floor(miny / cell_size)
-    local cy2 = math.floor(maxy / cell_size)
+    local cx1 = mfloor(minx / cell_size)
+    local cx2 = mfloor(maxx / cell_size)
+    local cy1 = mfloor(miny / cell_size)
+    local cy2 = mfloor(maxy / cell_size)
     local result = {}
     local seen = {}
     for cx = cx1, cx2 do
@@ -154,7 +162,7 @@ function M.compute(points, reaches)
                 seen[k] = true
                 local pk = points[k]
                 local cv = (pk.x - pa.x) * dy - (pk.y - pa.y) * dx
-                if math.abs(cv) <= EPS_GEOM then
+                if mabs(cv) <= EPS_GEOM then
                   local t = ((pk.x - pa.x) * dx + (pk.y - pa.y) * dy) / L2
                   if t > 1e-6 and t < 1 - 1e-6 then
                     result[#result + 1] = { t = t, k = k }
@@ -265,30 +273,32 @@ function M.compute(points, reaches)
     local m = #pts_idx
     if m < 4 then return {} end
 
-    -- Hot loop: O(n²) midpoint pairs. 2-level int table avoids per-pair
-    -- string allocation that vec_round.."_"..vec_round used to incur, and
-    -- the rounding is inlined to drop function-call overhead.
+    -- Hot loop: O(n²) midpoint pairs. The 2-level int table avoids string
+    -- allocation, the rounding is inlined to skip function-call overhead,
+    -- and each (i, j) pair is stored as a single packed int instead of a
+    -- {i, j} subtable so the inner body never allocates.
     local mid_groups = {}
     for ii = 1, m do
       local i = pts_idx[ii]
       local pix, piy = points[i].x, points[i].y
+      local i_packed = i * K
       for jj = ii + 1, m do
         local j = pts_idx[jj]
         local mx = pix + points[j].x
         local my = piy + points[j].y
         local rx
-        if mx >= 0 then rx = math.floor(mx * ROUND_SCALE + 0.5)
-        else rx = -math.floor(-mx * ROUND_SCALE + 0.5)
+        if mx >= 0 then rx = mfloor(mx * ROUND_SCALE + 0.5)
+        else rx = -mfloor(-mx * ROUND_SCALE + 0.5)
         end
         local ry
-        if my >= 0 then ry = math.floor(my * ROUND_SCALE + 0.5)
-        else ry = -math.floor(-my * ROUND_SCALE + 0.5)
+        if my >= 0 then ry = mfloor(my * ROUND_SCALE + 0.5)
+        else ry = -mfloor(-my * ROUND_SCALE + 0.5)
         end
         local row = mid_groups[rx]
         if not row then row = {}; mid_groups[rx] = row end
         local g = row[ry]
         if not g then g = {}; row[ry] = g end
-        g[#g + 1] = { i, j }
+        g[#g + 1] = i_packed + j
       end
     end
 
@@ -298,9 +308,13 @@ function M.compute(points, reaches)
         local glen = #grp
         if glen >= 2 then
           for pi = 1, glen do
-            local a, b = grp[pi][1], grp[pi][2]
+            local pa = grp[pi]
+            local a = mfloor(pa / K)
+            local b = pa - a * K
             for pj = pi + 1, glen do
-              local c, d = grp[pj][1], grp[pj][2]
+              local pb = grp[pj]
+              local c = mfloor(pb / K)
+              local d = pb - c * K
               if a ~= c and a ~= d and b ~= c and b ~= d then
                 local i, j, k = a, c, d  -- l = b
                 local v_a_x = points[j].x - points[i].x
@@ -338,7 +352,7 @@ function M.compute(points, reaches)
                       candidates[#candidates + 1] = {
                         corners = corners_ccw,
                         chains = chains,
-                        area = math.abs(cross_2d(va_x, va_y, vb_x, vb_y)),
+                        area = mabs(cross_2d(va_x, va_y, vb_x, vb_y)),
                       }
                     end
                   end
@@ -362,10 +376,10 @@ function M.compute(points, reaches)
     local v_b_x = p4.x - p1.x
     local v_b_y = p4.y - p1.y
     local eps = 1e-6
-    local a_horiz = math.abs(v_a_y) < eps
-    local a_vert  = math.abs(v_a_x) < eps
-    local b_horiz = math.abs(v_b_y) < eps
-    local b_vert  = math.abs(v_b_x) < eps
+    local a_horiz = mabs(v_a_y) < eps
+    local a_vert  = mabs(v_a_x) < eps
+    local b_horiz = mabs(v_b_y) < eps
+    local b_vert  = mabs(v_b_x) < eps
     local has_horiz = a_horiz or b_horiz
     local has_vert  = a_vert  or b_vert
     if has_horiz and has_vert then return 0 end
@@ -431,7 +445,7 @@ function M.compute(points, reaches)
               local new_P = {
                 corners = new_corners,
                 chains = chains,
-                area = math.abs(cross_2d(nva_x, nva_y, nvb_x, nvb_y)),
+                area = mabs(cross_2d(nva_x, nva_y, nvb_x, nvb_y)),
               }
               seen[k] = true
               expanded[#expanded + 1] = new_P
@@ -463,7 +477,7 @@ function M.compute(points, reaches)
     else
       short_a, short_b, diag_len = c1, c3, d_diag2
     end
-    if not (math.abs(diag_len - la) < 1e-4 or math.abs(diag_len - lb) < 1e-4) then
+    if not (mabs(diag_len - la) < 1e-4 or mabs(diag_len - lb) < 1e-4) then
       return {}
     end
 
@@ -486,11 +500,11 @@ function M.compute(points, reaches)
       local d12 = dist(q2.x, q2.y, q3.x, q3.y)
       local d02 = dist(q1.x, q1.y, q3.x, q3.y)
       local iso_v, base_a, base_b
-      if math.abs(d01 - d12) < 1e-4 then
+      if mabs(d01 - d12) < 1e-4 then
         iso_v, base_a, base_b = t2, t1, t3
-      elseif math.abs(d01 - d02) < 1e-4 then
+      elseif mabs(d01 - d02) < 1e-4 then
         iso_v, base_a, base_b = t1, t2, t3
-      elseif math.abs(d12 - d02) < 1e-4 then
+      elseif mabs(d12 - d02) < 1e-4 then
         iso_v, base_a, base_b = t3, t1, t2
       end
       if iso_v then
@@ -652,8 +666,8 @@ function M.compute(points, reaches)
     if minx > maxx then minx, maxx = maxx, minx end
     local miny, maxy = y1, y2
     if miny > maxy then miny, maxy = maxy, miny end
-    return math.floor(minx / cell_size), math.floor(maxx / cell_size),
-           math.floor(miny / cell_size), math.floor(maxy / cell_size)
+    return mfloor(minx / cell_size), mfloor(maxx / cell_size),
+           mfloor(miny / cell_size), mfloor(maxy / cell_size)
   end
 
   local function bucket_add_edge(idx, x1, y1, x2, y2)
@@ -750,10 +764,10 @@ function M.compute(points, reaches)
   for i = 1, n do
     local pi = points[i]
     local ri = reaches[i]
-    local cx_min = math.floor((pi.x - ri) / cell_size)
-    local cx_max = math.floor((pi.x + ri) / cell_size)
-    local cy_min = math.floor((pi.y - ri) / cell_size)
-    local cy_max = math.floor((pi.y + ri) / cell_size)
+    local cx_min = mfloor((pi.x - ri) / cell_size)
+    local cx_max = mfloor((pi.x + ri) / cell_size)
+    local cy_min = mfloor((pi.y - ri) / cell_size)
+    local cy_max = mfloor((pi.y + ri) / cell_size)
     for cx = cx_min, cx_max do
       local row = point_bucket[cx]
       if row then
