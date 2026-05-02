@@ -143,38 +143,69 @@ function M.compute(points, reaches)
   end
   stats.t_setup.stop()
 
-  -- Returns points strictly between i and j on the segment (sorted by t).
+  -- Reusable buffers for points_on_segment_strict so each call doesn't
+  -- allocate a fresh result table + seen set. Cleared at the top of every
+  -- call; the caller reads pos_seg_ks[1..count] (sorted by t).
+  local pos_seg_count = 0
+  local pos_seg_ts = {}
+  local pos_seg_ks = {}
+  local pos_seg_seen = {}
+  local pos_seg_seen_count = 0
+  local pos_seg_seen_keys = {}
+
+  -- Per-pole reach squared, so make_chain can compare squared lengths and
+  -- skip the per-segment math.sqrt.
+  local reaches_sq = {}
+  for i = 1, n do reaches_sq[i] = reaches[i] * reaches[i] end
+  local function pair_reach_sq(i, j)
+    local ri, rj = reaches_sq[i], reaches_sq[j]
+    return ri < rj and ri or rj
+  end
+
+  -- Fills pos_seg_ts[] / pos_seg_ks[] with collinear interior points of
+  -- segment i—j, sorted by t in [0, 1]. Returns the count.
   local function points_on_segment_strict(i, j)
-    local pa, pb = points[i], points[j]
-    local dx = pb.x - pa.x
-    local dy = pb.y - pa.y
+    pos_seg_count = 0
+    for si = 1, pos_seg_seen_count do
+      pos_seg_seen[pos_seg_seen_keys[si]] = nil
+    end
+    pos_seg_seen_count = 0
+
+    local pax, pay = pxs[i], pys[i]
+    local pbx, pby = pxs[j], pys[j]
+    local dx = pbx - pax
+    local dy = pby - pay
     local L2 = dx * dx + dy * dy
-    if L2 < 1e-12 then return {} end
-    local minx, maxx = pa.x, pb.x
+    if L2 < 1e-12 then return 0 end
+    local minx, maxx = pax, pbx
     if minx > maxx then minx, maxx = maxx, minx end
-    local miny, maxy = pa.y, pb.y
+    local miny, maxy = pay, pby
     if miny > maxy then miny, maxy = maxy, miny end
     local cx1 = mfloor(minx / cell_size)
     local cx2 = mfloor(maxx / cell_size)
     local cy1 = mfloor(miny / cell_size)
     local cy2 = mfloor(maxy / cell_size)
-    local result = {}
-    local seen = {}
     for cx = cx1, cx2 do
       local row = point_bucket[cx]
       if row then
         for cy = cy1, cy2 do
           local cell = row[cy]
           if cell then
-            for _, k in ipairs(cell) do
-              if k ~= i and k ~= j and not seen[k] then
-                seen[k] = true
-                local pk = points[k]
-                local cv = (pk.x - pa.x) * dy - (pk.y - pa.y) * dx
+            for ki = 1, #cell do
+              local k = cell[ki]
+              if k ~= i and k ~= j and not pos_seg_seen[k] then
+                pos_seg_seen[k] = true
+                pos_seg_seen_count = pos_seg_seen_count + 1
+                pos_seg_seen_keys[pos_seg_seen_count] = k
+                local pkx = pxs[k]
+                local pky = pys[k]
+                local cv = (pkx - pax) * dy - (pky - pay) * dx
                 if mabs(cv) <= EPS_GEOM then
-                  local t = ((pk.x - pa.x) * dx + (pk.y - pa.y) * dy) / L2
+                  local t = ((pkx - pax) * dx + (pky - pay) * dy) / L2
                   if t > 1e-6 and t < 1 - 1e-6 then
-                    result[#result + 1] = { t = t, k = k }
+                    pos_seg_count = pos_seg_count + 1
+                    pos_seg_ts[pos_seg_count] = t
+                    pos_seg_ks[pos_seg_count] = k
                   end
                 end
               end
@@ -183,25 +214,62 @@ function M.compute(points, reaches)
         end
       end
     end
-    table.sort(result, function(a, b) return a.t < b.t end)
-    return result
+
+    -- Insertion sort by t — typical count is 0–3, so simpler than table.sort
+    -- and skips the comparator-closure call.
+    for si = 2, pos_seg_count do
+      local key_t = pos_seg_ts[si]
+      local key_k = pos_seg_ks[si]
+      local sj = si - 1
+      while sj >= 1 and pos_seg_ts[sj] > key_t do
+        pos_seg_ts[sj + 1] = pos_seg_ts[sj]
+        pos_seg_ks[sj + 1] = pos_seg_ks[sj]
+        sj = sj - 1
+      end
+      pos_seg_ts[sj + 1] = key_t
+      pos_seg_ks[sj + 1] = key_k
+    end
+
+    return pos_seg_count
   end
 
-  -- Chain i -> mids -> j; nil if any sub-segment exceeds its pair reach.
+  -- Cache make_chain results so duplicate sides across adjacent parl
+  -- candidates don't redo the segment scan. Keyed canonically by (lo, hi)
+  -- because chain direction doesn't affect the resulting edge set.
+  local chain_cache = {}
+
   local function make_chain(i, j)
-    local mids = points_on_segment_strict(i, j)
-    local chain = { i }
-    for _, m in ipairs(mids) do chain[#chain + 1] = m.k end
-    chain[#chain + 1] = j
+    local lo, hi = i, j
+    if lo > hi then lo, hi = hi, lo end
+    local row = chain_cache[lo]
+    if row then
+      local cached = row[hi]
+      if cached ~= nil then
+        if cached == false then return nil end
+        return cached
+      end
+    else
+      row = {}; chain_cache[lo] = row
+    end
+
+    local count = points_on_segment_strict(lo, hi)
+    local chain = { lo }
+    for ki = 1, count do chain[#chain + 1] = pos_seg_ks[ki] end
+    chain[#chain + 1] = hi
+
+    -- Squared-length validation — skips one math.sqrt per segment.
     for ci = 1, #chain - 1 do
       local a = chain[ci]
       local b = chain[ci + 1]
-      local pa = points[a]
-      local pb = points[b]
-      if dist(pa.x, pa.y, pb.x, pb.y) > pair_reach(a, b) + 1e-9 then
+      local segdx = pxs[b] - pxs[a]
+      local segdy = pys[b] - pys[a]
+      if segdx * segdx + segdy * segdy > pair_reach_sq(a, b) then
+        row[hi] = false
         return nil
       end
     end
+
+    row[hi] = chain
     return chain
   end
 
