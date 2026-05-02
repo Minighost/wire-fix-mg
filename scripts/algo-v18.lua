@@ -153,6 +153,18 @@ function M.compute(points, reaches)
   local pos_seg_seen_count = 0
   local pos_seg_seen_keys = {}
 
+  -- Diagnostic-only counters / sub-profilers. Not load-bearing — reading
+  -- their values doesn't change algorithm output.
+  local cache_hits = 0
+  local cache_misses = 0
+  local chain_short = 0   -- side² ≤ pair_reach²
+  local chain_medium = 0  -- pair_reach² < side² ≤ 4·pair_reach²
+  local chain_long = 0    -- side² > 4·pair_reach²
+  local t_chain = game.create_profiler()
+  t_chain.stop()
+  local t_pos_seg = game.create_profiler()
+  t_pos_seg.stop()
+
   -- Per-pole reach squared, so make_chain can compare squared lengths and
   -- skip the per-segment math.sqrt.
   local reaches_sq = {}
@@ -165,6 +177,7 @@ function M.compute(points, reaches)
   -- Fills pos_seg_ts[] / pos_seg_ks[] with collinear interior points of
   -- segment i—j, sorted by t in [0, 1]. Returns the count.
   local function points_on_segment_strict(i, j)
+    t_pos_seg.start()
     pos_seg_count = 0
     for si = 1, pos_seg_seen_count do
       pos_seg_seen[pos_seg_seen_keys[si]] = nil
@@ -176,7 +189,7 @@ function M.compute(points, reaches)
     local dx = pbx - pax
     local dy = pby - pay
     local L2 = dx * dx + dy * dy
-    if L2 < 1e-12 then return 0 end
+    if L2 < 1e-12 then t_pos_seg.stop(); return 0 end
     local minx, maxx = pax, pbx
     if minx > maxx then minx, maxx = maxx, minx end
     local miny, maxy = pay, pby
@@ -230,6 +243,7 @@ function M.compute(points, reaches)
       pos_seg_ks[sj + 1] = key_k
     end
 
+    t_pos_seg.stop()
     return pos_seg_count
   end
 
@@ -238,19 +252,28 @@ function M.compute(points, reaches)
   -- because chain direction doesn't affect the resulting edge set.
   local chain_cache = {}
 
-  local function make_chain(i, j)
-    local lo, hi = i, j
-    if lo > hi then lo, hi = hi, lo end
+  local function _make_chain_inner(lo, hi)
+    -- Side bucket counter (diagnostic-only).
+    local sx = pxs[hi] - pxs[lo]
+    local sy = pys[hi] - pys[lo]
+    local side_sq = sx * sx + sy * sy
+    local pr_sq = pair_reach_sq(lo, hi)
+    if side_sq <= pr_sq then chain_short = chain_short + 1
+    elseif side_sq <= 4 * pr_sq then chain_medium = chain_medium + 1
+    else chain_long = chain_long + 1 end
+
     local row = chain_cache[lo]
     if row then
       local cached = row[hi]
       if cached ~= nil then
+        cache_hits = cache_hits + 1
         if cached == false then return nil end
         return cached
       end
     else
       row = {}; chain_cache[lo] = row
     end
+    cache_misses = cache_misses + 1
 
     local count = points_on_segment_strict(lo, hi)
     local chain = { lo }
@@ -271,6 +294,15 @@ function M.compute(points, reaches)
 
     row[hi] = chain
     return chain
+  end
+
+  local function make_chain(i, j)
+    local lo, hi = i, j
+    if lo > hi then lo, hi = hi, lo end
+    t_chain.start()
+    local r = _make_chain_inner(lo, hi)
+    t_chain.stop()
+    return r
   end
 
   -- SAT-based parallelogram-on-parallelogram overlap test.
@@ -770,6 +802,14 @@ function M.compute(points, reaches)
   end
 
   detect_phased()
+
+  stats.cache_hits = cache_hits
+  stats.cache_misses = cache_misses
+  stats.chain_short = chain_short
+  stats.chain_medium = chain_medium
+  stats.chain_long = chain_long
+  stats.t_chain = t_chain
+  stats.t_pos_seg = t_pos_seg
 
   -- =========================================================
   -- Phase B: collect edges + Kruskal MST closure (with intersection check)

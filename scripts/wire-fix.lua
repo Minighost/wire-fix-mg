@@ -153,6 +153,13 @@ function M.run(player_index, entities)
       v18_stats.pair_checks or 0, v18_stats.angle_pass or 0,
       v18_stats.chain_calls or 0, v18_stats.chain_success or 0))
     player.print({"",
+      "    chain_total=", v18_stats.t_chain,
+      "  pos_seg_total=", v18_stats.t_pos_seg})
+    player.print(string.format(
+      "    cache hits=%d misses=%d  side: short=%d medium=%d long=%d",
+      v18_stats.cache_hits or 0, v18_stats.cache_misses or 0,
+      v18_stats.chain_short or 0, v18_stats.chain_medium or 0, v18_stats.chain_long or 0))
+    player.print({"",
       "  phase_loop=", v18_stats.t_phase_loop,
       "  iso=", v18_stats.t_iso,
       "  pattern_edges=", v18_stats.t_pattern_edges,
