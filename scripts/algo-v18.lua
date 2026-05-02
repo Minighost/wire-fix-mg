@@ -131,12 +131,6 @@ function M.compute(points, reaches)
     if reaches[i] > max_reach then max_reach = reaches[i] end
   end
   local cell_size = max_reach
-  -- A parl side that needs more than 4 chain segments is almost certainly a
-  -- noise candidate (random midpoint match between far poles). Pre-filter
-  -- on side length squared lets us skip ~majority of failing make_chain
-  -- calls in the iterate loop.
-  local MAX_CHAIN_SEGMENTS = 4
-  local chain_limit_sq = (max_reach * MAX_CHAIN_SEGMENTS) * (max_reach * MAX_CHAIN_SEGMENTS)
   local point_bucket = {}
   for i = 1, n do
     local cx = mfloor(points[i].x / cell_size)
@@ -427,8 +421,7 @@ function M.compute(points, reaches)
                 local v_b_y = pys[k] - piy
                 local la2 = v_a_x * v_a_x + v_a_y * v_a_y
                 local lb2 = v_b_x * v_b_x + v_b_y * v_b_y
-                if la2 >= 1e-18 and lb2 >= 1e-18
-                   and la2 <= chain_limit_sq and lb2 <= chain_limit_sq then
+                if la2 >= 1e-18 and lb2 >= 1e-18 then
                   local dotv = v_a_x * v_b_x + v_a_y * v_b_y
                   if 4 * dotv * dotv <= la2 * lb2 then
                     angle_pass = angle_pass + 1
