@@ -98,6 +98,15 @@ function M.compute(points, reaches)
   -- {i, j} table allocations.
   local K = n + 1
 
+  -- Flat coordinate arrays. The hot loops access pxs[i] / pys[i] (int-keyed
+  -- array) instead of points[i].x (table-field hash lookup), which JITs into
+  -- a direct memory load.
+  local pxs, pys = {}, {}
+  for i = 1, n do
+    pxs[i] = points[i].x
+    pys[i] = points[i].y
+  end
+
   stats.t_setup = game.create_profiler()
   -- pos_to_idx: round positions for symmetric-target lookup. 2-level int
   -- table avoids per-build string allocation; callers index pos_to_idx[rx][ry].
@@ -263,29 +272,29 @@ function M.compute(points, reaches)
     return true
   end
 
-  -- Enumerate parallelogram candidates from a set of point indices.
+  -- Enumerate parallelogram candidates over the full pole set.
   -- Two pairs sharing a midpoint = diagonals of a parallelogram.
   -- Filter by side-angle in [60°, 120°] (4·dot² ≤ |a|²|b|²).
-  local function enumerate_parls(point_indices_set)
-    local pts_idx = {}
-    for k in pairs(point_indices_set) do pts_idx[#pts_idx + 1] = k end
-    table.sort(pts_idx)
-    local m = #pts_idx
-    if m < 4 then return {} end
+  local function enumerate_parls()
+    if n < 4 then return {} end
 
-    -- Hot loop: O(n²) midpoint pairs. The 2-level int table avoids string
-    -- allocation, the rounding is inlined to skip function-call overhead,
-    -- and each (i, j) pair is stored as a single packed int instead of a
-    -- {i, j} subtable so the inner body never allocates.
+    -- Hot loop: O(n²) midpoint pairs.
+    --   * 2-level int tables avoid string-key allocation.
+    --   * Pairs are packed as a single int (i * K + j); flat array storage.
+    --   * Singleton midpoints stay inline in mid_first as a raw int and only
+    --     get promoted to a list in mid_groups when a second pair arrives,
+    --     so the common (singleton) case never allocates a group table.
+    --   * pxs / pys are flat int-keyed arrays — one load instead of a
+    --     points[i].x table-field hash lookup.
+    local mid_first = {}
     local mid_groups = {}
-    for ii = 1, m do
-      local i = pts_idx[ii]
-      local pix, piy = points[i].x, points[i].y
+    for i = 1, n do
+      local pix = pxs[i]
+      local piy = pys[i]
       local i_packed = i * K
-      for jj = ii + 1, m do
-        local j = pts_idx[jj]
-        local mx = pix + points[j].x
-        local my = piy + points[j].y
+      for j = i + 1, n do
+        local mx = pix + pxs[j]
+        local my = piy + pys[j]
         local rx
         if mx >= 0 then rx = mfloor(mx * ROUND_SCALE + 0.5)
         else rx = -mfloor(-mx * ROUND_SCALE + 0.5)
@@ -294,11 +303,23 @@ function M.compute(points, reaches)
         if my >= 0 then ry = mfloor(my * ROUND_SCALE + 0.5)
         else ry = -mfloor(-my * ROUND_SCALE + 0.5)
         end
-        local row = mid_groups[rx]
-        if not row then row = {}; mid_groups[rx] = row end
-        local g = row[ry]
-        if not g then g = {}; row[ry] = g end
-        g[#g + 1] = i_packed + j
+        local packed = i_packed + j
+        local row_f = mid_first[rx]
+        if not row_f then row_f = {}; mid_first[rx] = row_f end
+        local existing = row_f[ry]
+        if not existing then
+          row_f[ry] = packed
+        else
+          local row_g = mid_groups[rx]
+          if not row_g then row_g = {}; mid_groups[rx] = row_g end
+          local g = row_g[ry]
+          if not g then
+            g = { existing, packed }
+            row_g[ry] = g
+          else
+            g[#g + 1] = packed
+          end
+        end
       end
     end
 
@@ -317,10 +338,11 @@ function M.compute(points, reaches)
               local d = pb - c * K
               if a ~= c and a ~= d and b ~= c and b ~= d then
                 local i, j, k = a, c, d  -- l = b
-                local v_a_x = points[j].x - points[i].x
-                local v_a_y = points[j].y - points[i].y
-                local v_b_x = points[k].x - points[i].x
-                local v_b_y = points[k].y - points[i].y
+                local pix = pxs[i]; local piy = pys[i]
+                local v_a_x = pxs[j] - pix
+                local v_a_y = pys[j] - piy
+                local v_b_x = pxs[k] - pix
+                local v_b_y = pys[k] - piy
                 local la2 = v_a_x * v_a_x + v_a_y * v_a_y
                 local lb2 = v_b_x * v_b_x + v_b_y * v_b_y
                 if la2 >= 1e-18 and lb2 >= 1e-18 then
@@ -342,13 +364,13 @@ function M.compute(points, reaches)
                       chains[ci] = ch
                     end
                     if ok then
-                      local p1 = points[corners_ccw[1]]
-                      local p2 = points[corners_ccw[2]]
-                      local p4 = points[corners_ccw[4]]
-                      local va_x = p2.x - p1.x
-                      local va_y = p2.y - p1.y
-                      local vb_x = p4.x - p1.x
-                      local vb_y = p4.y - p1.y
+                      local c1 = corners_ccw[1]
+                      local c2 = corners_ccw[2]
+                      local c4 = corners_ccw[4]
+                      local va_x = pxs[c2] - pxs[c1]
+                      local va_y = pys[c2] - pys[c1]
+                      local vb_x = pxs[c4] - pxs[c1]
+                      local vb_y = pys[c4] - pys[c1]
                       candidates[#candidates + 1] = {
                         corners = corners_ccw,
                         chains = chains,
@@ -545,9 +567,9 @@ function M.compute(points, reaches)
   -- Within each phase, area asc; primary acceptance requires no overlap
   -- with prior primaries OR expansions; expansion is cascading and skips
   -- overlap check (only deduped by quad_key).
-  local function detect_phased(point_indices_set)
+  local function detect_phased()
     stats.t_enumerate = game.create_profiler()
-    local candidates = enumerate_parls(point_indices_set)
+    local candidates = enumerate_parls()
     stats.t_enumerate.stop()
     stats.candidates = #candidates
     if #candidates == 0 then
@@ -629,9 +651,7 @@ function M.compute(points, reaches)
     stats.t_iso.stop()
   end
 
-  local all_set = {}
-  for i = 1, n do all_set[i] = true end
-  detect_phased(all_set)
+  detect_phased()
 
   -- =========================================================
   -- Phase B: collect edges + Kruskal MST closure (with intersection check)
