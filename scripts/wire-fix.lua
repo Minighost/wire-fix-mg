@@ -162,12 +162,6 @@ function M.run(player_index, entities)
       algo_stats.segment_count, algo_stats.candidate_count,
       algo_stats.accepted_count, algo_stats.edges_from_parls,
       algo_stats.total_edges))
-    player.print({"",
-      "  phase_loop=", v18_stats.t_phase_loop,
-      "  iso=", v18_stats.t_iso,
-      "  pattern_edges=", v18_stats.t_pattern_edges,
-      "  mst_cand=", v18_stats.t_mst_cand,
-      "  mst_closure=", v18_stats.t_mst_closure})
   end
 end
 
