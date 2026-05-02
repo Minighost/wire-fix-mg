@@ -90,10 +90,10 @@ function M.run(player_index, entities)
   local v18_edges, v18_parls, v18_iso, v18_stats = algo_v18.compute(points, reaches)
   p_v18.stop()
 
-  -- Test-only: measure segment detection separately. Doesn't affect the
-  -- diff-apply below; just times the alternative approach for comparison.
+  -- Test-only: measure segment-based parl candidate enumeration. Doesn't
+  -- affect the diff-apply below; just times the alternative approach.
   local p_seg = game.create_profiler()
-  local seg_segments, seg_stats = algo_segments.detect_segments(points, reaches)
+  local seg_candidates, seg_stats = algo_segments.compute(points, reaches)
   p_seg.stop()
 
   -- Phase 3: build wanted set keyed by pair_key(unit_number).
@@ -167,12 +167,18 @@ function M.run(player_index, entities)
       "[seg test] total=", p_seg,
       "  setup=", seg_stats.t_setup,
       "  pairs=", seg_stats.t_pairs,
-      "  segments=", seg_stats.t_segments})
+      "  segments=", seg_stats.t_segments,
+      "  index=", seg_stats.t_index,
+      "  parls=", seg_stats.t_parls})
     player.print(string.format(
       "  pairs=%d  lines=%d  segments=%d  max_seg_len=%d  total_seg_poles=%d",
       seg_stats.pair_count, seg_stats.line_count,
       seg_stats.segment_count, seg_stats.max_seg_len,
       seg_stats.total_segment_poles))
+    player.print(string.format(
+      "  triples=%d  C_real=%d  C_bc_ok=%d  C_dc_ok=%d  angle_ok=%d  unique=%d",
+      seg_stats.triples, seg_stats.C_real, seg_stats.C_bc_ok,
+      seg_stats.C_dc_ok, seg_stats.angle_ok, seg_stats.unique_parls))
     player.print({"",
       "  phase_loop=", v18_stats.t_phase_loop,
       "  iso=", v18_stats.t_iso,
