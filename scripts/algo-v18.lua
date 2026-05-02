@@ -721,6 +721,7 @@ function M.compute(points, reaches)
                and p_bymin <= Q.bymax and p_bymax >= Q.bymin then
               if quads_overlap(P.corners, Q.corners) then conflict = true; break end
             end
+          end
         end
         if not conflict then
           primary_parls[#primary_parls + 1] = P
