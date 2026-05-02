@@ -75,11 +75,13 @@ function M.run(player_index, entities)
   end
   p_phase1.stop()
 
-  -- Phase 2: pattern-aware layout (algo v18).
+  -- Phase 2: segment-based pattern detection.
   -- NOTE: the per-user "max connections per pole" setting is NOT honored in
-  -- v0.2 — v18 may produce more wires per pole than v0.1.0. Re-introducing
-  -- the cap is tracked for a follow-up.
-  local p_v18 = game.create_profiler()
+  -- v0.2 — the algorithm may produce more wires per pole than v0.1.0.
+  -- Re-introducing the cap is tracked for a follow-up.
+  -- algo_v18 is still required at the top of the file as a fallback; revert
+  -- this commit to switch back to the midpoint-based algorithm.
+  local p_algo = game.create_profiler()
   local points = {}
   local reaches = {}
   for i = 1, n do
@@ -87,18 +89,13 @@ function M.run(player_index, entities)
     points[i] = { x = p.position.x, y = p.position.y }
     reaches[i] = p.prototype.get_max_wire_distance(p.quality)
   end
-  local v18_edges, v18_parls, v18_iso, v18_stats = algo_v18.compute(points, reaches)
-  p_v18.stop()
-
-  -- Test-only: measure segment-based parl candidate enumeration. Doesn't
-  -- affect the diff-apply below; just times the alternative approach.
-  local p_seg = game.create_profiler()
-  local seg_candidates, seg_stats = algo_segments.compute(points, reaches)
-  p_seg.stop()
+  local algo_edges, algo_accepted, algo_candidates, algo_stats =
+    algo_segments.compute(points, reaches)
+  p_algo.stop()
 
   -- Phase 3: build wanted set keyed by pair_key(unit_number).
   local wanted = {}
-  for _, edge in ipairs(v18_edges) do
+  for _, edge in ipairs(algo_edges) do
     local pa, pb = poles[edge[1]], poles[edge[2]]
     wanted[pair_key(pa.unit_number, pb.unit_number)] = { pa, pb }
   end
@@ -137,48 +134,34 @@ function M.run(player_index, entities)
   p_diff.stop()
   p_total.stop()
 
-  notify(player, "wire-fix.done", n, #v18_edges)
+  notify(player, "wire-fix.done", n, #algo_edges)
 
   if config.dev_mode then
     local internal_count = 0
     for _ in pairs(internal_pairs) do internal_count = internal_count + 1 end
-    player.print({"", "[Wire Fix v0.2/v18] total: ", p_total})
+    player.print({"", "[Wire Fix v0.2/segments] total: ", p_total})
     player.print(string.format(
-      "  poles=%d  internal_existing=%d  edges_wanted=%d  candidates=%d  primary=%d  expansion=%d  iso=%d  mst_cand=%d  api: disconnect=%d connect=%d",
-      n, internal_count, #v18_edges,
-      v18_stats.candidates or 0, v18_stats.primary or 0, v18_stats.expansion or 0,
-      #v18_iso, v18_stats.mst_cand_count or 0,
+      "  poles=%d  internal_existing=%d  edges_wanted=%d  candidates=%d  accepted=%d  api: disconnect=%d connect=%d",
+      n, internal_count, #algo_edges,
+      algo_stats.candidate_count or 0, algo_stats.accepted_count or 0,
       disconnect_calls, connect_calls))
-    player.print({"", "  phase1=", p_phase1, "  v18=", p_v18, "  diff=", p_diff})
+    player.print({"", "  phase1=", p_phase1, "  algo=", p_algo, "  diff=", p_diff})
     player.print({"",
-      "  setup=", v18_stats.t_setup,
-      "  enumerate=", v18_stats.t_enumerate,
-      "    insert=", v18_stats.t_enum_insert,
-      "  iterate=", v18_stats.t_enum_iterate})
-    player.print(string.format(
-      "    pair_checks=%d  angle_pass=%d  chain_calls=%d  chain_success=%d",
-      v18_stats.pair_checks or 0, v18_stats.angle_pass or 0,
-      v18_stats.chain_calls or 0, v18_stats.chain_success or 0))
-    player.print(string.format(
-      "    cache hits=%d misses=%d  side: short=%d medium=%d long=%d",
-      v18_stats.cache_hits or 0, v18_stats.cache_misses or 0,
-      v18_stats.chain_short or 0, v18_stats.chain_medium or 0, v18_stats.chain_long or 0))
+      "  setup=", algo_stats.t_setup,
+      "  pairs=", algo_stats.t_pairs,
+      "  segments=", algo_stats.t_segments,
+      "  index=", algo_stats.t_index})
     player.print({"",
-      "[seg test] total=", p_seg,
-      "  setup=", seg_stats.t_setup,
-      "  pairs=", seg_stats.t_pairs,
-      "  segments=", seg_stats.t_segments,
-      "  index=", seg_stats.t_index,
-      "  parls=", seg_stats.t_parls})
+      "  parls=", algo_stats.t_parls,
+      "  accept=", algo_stats.t_accept,
+      "  edges=", algo_stats.t_edges,
+      "  mst=", algo_stats.t_mst})
     player.print(string.format(
-      "  pairs=%d  lines=%d  segments=%d  max_seg_len=%d  total_seg_poles=%d",
-      seg_stats.pair_count, seg_stats.line_count,
-      seg_stats.segment_count, seg_stats.max_seg_len,
-      seg_stats.total_segment_poles))
-    player.print(string.format(
-      "  triples=%d  C_real=%d  C_bc_ok=%d  C_dc_ok=%d  angle_ok=%d  unique=%d",
-      seg_stats.triples, seg_stats.C_real, seg_stats.C_bc_ok,
-      seg_stats.C_dc_ok, seg_stats.angle_ok, seg_stats.unique_parls))
+      "  pair_count=%d  lines=%d  segments=%d  candidates=%d  accepted=%d  edges_from_parls=%d  total_edges=%d",
+      algo_stats.pair_count, algo_stats.line_count,
+      algo_stats.segment_count, algo_stats.candidate_count,
+      algo_stats.accepted_count, algo_stats.edges_from_parls,
+      algo_stats.total_edges))
     player.print({"",
       "  phase_loop=", v18_stats.t_phase_loop,
       "  iso=", v18_stats.t_iso,

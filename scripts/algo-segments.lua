@@ -1,27 +1,30 @@
--- Test-only module: segment-based parallelogram detection.
+-- Segment-based parallelogram detection.
 --
--- Stage 1 (detect_segments): exact integer line keying. Pole positions are
--- cast to fixed-point ints, pair direction is reduced via gcd to (ndx, ndy)
--- with canonical sign, and the line offset c = ndy·x_anchor − ndx·y_anchor
--- is computed in integers. Same line ⇔ same (ndx, ndy, c) triple.
---
--- Stage 2 (detect_parl_candidates): enumerate parallelogram candidates from
--- the segment graph. For each pole A, iterate pairs of segments through A
--- (different directions). For each (B in S1 after A) × (D in S2 after A),
--- compute the 4th corner C = B + D − A. Accept the (A, B, C, D) quadruple
--- iff:
---   - C exists as a real pole (pos_to_idx hit)
---   - B and C share a segment in S2's direction
---   - D and C share a segment in S1's direction
---   - The (A→B, A→D) angle is in [60°, 120°] (4·dot² ≤ |a|²·|b|²)
--- Each parl is enumerated 4 times (once per corner-as-A); dedupe by sorted
--- 4-tuple of pole indices.
+-- Pipeline:
+--   1. Detect maximal collinear segments via exact integer line keying
+--      (no angle/offset quantization). Pole positions are cast to fixed-point
+--      ints, pair direction is reduced via gcd to (ndx, ndy) with canonical
+--      sign, and the line offset c = ndy·x_anchor − ndx·y_anchor is integer.
+--   2. Enumerate parallelogram candidates by walking (A, B, D) triples where
+--      A is shared by two through-segments and B/D follow A in their
+--      segments. The 4th corner C = B + D − A must exist as a real pole and
+--      lie on the matching cross segments.
+--   3. Filter by 60°–120° interior angle.
+--   4. Within phase priority (rectangle / horiz-aligned / vert-aligned /
+--      diagonal), accept smallest-area parls first, rejecting those that
+--      overlap an already-accepted one (axis-aligned bbox prefilter + SAT).
+--   5. Emit parl-side edges (each side traces the consecutive poles on its
+--      segment between the two corners).
+--   6. Kruskal MST closure connects any remaining components by shortest
+--      edge with an intersection check against the accepted edge set.
 
 local M = {}
 
 local mfloor = math.floor
 local mabs = math.abs
+local msqrt = math.sqrt
 
+local EPS = 1e-9
 local ROUND_SCALE = 10000
 
 local function int_coord(x)
@@ -138,8 +141,6 @@ local function detect_segments_impl(points, reaches, n, stats)
   stats.t_segments = game.create_profiler()
   local segments = {}
   local line_count = 0
-  local max_seg_len = 0
-  local total_segment_poles = 0
   for _, row_a in pairs(lines) do
     for _, row_b in pairs(row_a) do
       for _, line in pairs(row_b) do
@@ -173,8 +174,6 @@ local function detect_segments_impl(points, reaches, n, stats)
                 segments[#segments + 1] = {
                   poles = current, ndx = ndx, ndy = ndy,
                 }
-                total_segment_poles = total_segment_poles + #current
-                if #current > max_seg_len then max_seg_len = #current end
               end
               current = { curr }
             end
@@ -183,8 +182,6 @@ local function detect_segments_impl(points, reaches, n, stats)
             segments[#segments + 1] = {
               poles = current, ndx = ndx, ndy = ndy,
             }
-            total_segment_poles = total_segment_poles + #current
-            if #current > max_seg_len then max_seg_len = #current end
           end
         end
       end
@@ -194,40 +191,101 @@ local function detect_segments_impl(points, reaches, n, stats)
 
   stats.line_count = line_count
   stats.segment_count = #segments
-  stats.max_seg_len = max_seg_len
-  stats.total_segment_poles = total_segment_poles
 
-  return segments, pxs, pys, pixs, piys
-end
-
-function M.detect_segments(points, reaches)
-  local n = #points
-  local stats = {}
-  detect_segments_impl(points, reaches, n, stats)
-  return stats
+  return segments, pxs, pys, pixs, piys, cell_size, point_bucket
 end
 
 -- ============================================================================
--- Stage 2: parl candidate enumeration
+-- Stage 2-6: full pipeline
 -- ============================================================================
+
+local function quads_overlap(corners_P, corners_Q, pxs, pys)
+  local pp1 = corners_P[1]; local pp2 = corners_P[2]
+  local pp3 = corners_P[3]; local pp4 = corners_P[4]
+  local qp1 = corners_Q[1]; local qp2 = corners_Q[2]
+  local qp3 = corners_Q[3]; local qp4 = corners_Q[4]
+  local pp1x, pp1y = pxs[pp1], pys[pp1]
+  local pp2x, pp2y = pxs[pp2], pys[pp2]
+  local pp3x, pp3y = pxs[pp3], pys[pp3]
+  local pp4x, pp4y = pxs[pp4], pys[pp4]
+  local qp1x, qp1y = pxs[qp1], pys[qp1]
+  local qp2x, qp2y = pxs[qp2], pys[qp2]
+  local qp3x, qp3y = pxs[qp3], pys[qp3]
+  local qp4x, qp4y = pxs[qp4], pys[qp4]
+  for axis_idx = 1, 4 do
+    local ax, ay
+    if axis_idx == 1 then
+      ax = pp2y - pp1y; ay = pp1x - pp2x
+    elseif axis_idx == 2 then
+      ax = pp3y - pp2y; ay = pp2x - pp3x
+    elseif axis_idx == 3 then
+      ax = qp2y - qp1y; ay = qp1x - qp2x
+    else
+      ax = qp3y - qp2y; ay = qp2x - qp3x
+    end
+    if ax * ax + ay * ay >= 1e-18 then
+      local p1 = pp1x * ax + pp1y * ay
+      local p2 = pp2x * ax + pp2y * ay
+      local p3 = pp3x * ax + pp3y * ay
+      local p4 = pp4x * ax + pp4y * ay
+      local pmin, pmax = p1, p1
+      if p2 < pmin then pmin = p2 end
+      if p2 > pmax then pmax = p2 end
+      if p3 < pmin then pmin = p3 end
+      if p3 > pmax then pmax = p3 end
+      if p4 < pmin then pmin = p4 end
+      if p4 > pmax then pmax = p4 end
+      local q1 = qp1x * ax + qp1y * ay
+      local q2 = qp2x * ax + qp2y * ay
+      local q3 = qp3x * ax + qp3y * ay
+      local q4 = qp4x * ax + qp4y * ay
+      local qmin, qmax = q1, q1
+      if q2 < qmin then qmin = q2 end
+      if q2 > qmax then qmax = q2 end
+      if q3 < qmin then qmin = q3 end
+      if q3 > qmax then qmax = q3 end
+      if q4 < qmin then qmin = q4 end
+      if q4 > qmax then qmax = q4 end
+      if pmax < qmin + EPS or qmax < pmin + EPS then
+        return false
+      end
+    end
+  end
+  return true
+end
+
+local function segs_intersect(p1x, p1y, p2x, p2y, p3x, p3y, p4x, p4y)
+  if (p1x == p3x and p1y == p3y) or (p1x == p4x and p1y == p4y)
+     or (p2x == p3x and p2y == p3y) or (p2x == p4x and p2y == p4y) then
+    return false
+  end
+  local d1 = (p4x - p3x) * (p1y - p3y) - (p4y - p3y) * (p1x - p3x)
+  local d2 = (p4x - p3x) * (p2y - p3y) - (p4y - p3y) * (p2x - p3x)
+  local d3 = (p2x - p1x) * (p3y - p1y) - (p2y - p1y) * (p3x - p1x)
+  local d4 = (p2x - p1x) * (p4y - p1y) - (p2y - p1y) * (p4x - p1x)
+  if ((d1 > EPS and d2 < -EPS) or (d1 < -EPS and d2 > EPS)) and
+     ((d3 > EPS and d4 < -EPS) or (d3 < -EPS and d4 > EPS)) then
+    return true
+  end
+  return false
+end
 
 function M.compute(points, reaches)
   local n = #points
   local stats = {}
-  local segments, pxs, pys, pixs, piys =
+  if n < 2 then return {}, {}, {}, stats end
+
+  local segments, pxs, pys, pixs, piys, cell_size, point_bucket =
     detect_segments_impl(points, reaches, n, stats)
 
+  -- ---- index ----
   stats.t_index = game.create_profiler()
-  -- pos_to_idx: integer (pix, piy) → pole index. 2-level table.
   local pos_to_idx = {}
   for i = 1, n do
     local row = pos_to_idx[pixs[i]]
     if not row then row = {}; pos_to_idx[pixs[i]] = row end
     row[piys[i]] = i
   end
-  -- segs_by_dir[pole][dir_key] = seg_idx. dir_key packs (ndx, ndy) into a
-  -- string; one segment per (pole, direction).
-  -- pole_to_pos_in_seg[pole][seg_idx] = position index in segment.
   local segs_by_dir = {}
   local pole_to_pos = {}
   for s_idx = 1, #segments do
@@ -244,25 +302,14 @@ function M.compute(points, reaches)
   end
   stats.t_index.stop()
 
+  -- ---- enumerate parl candidates ----
   stats.t_parls = game.create_profiler()
-  -- For each pole A, iterate pairs of segments through A (different directions),
-  -- then iterate (B in S1 after A) × (D in S2 after A).
-  -- Compute C = B + D − A, check it's a real pole on the right segments,
-  -- check angle 60–120°, dedupe via sorted 4-tuple.
   local candidates = {}
-  local seen_parls = {}  -- canonical "p1_p2_p3_p4" key → true
-  local counter_triples = 0
-  local counter_C_real = 0
-  local counter_C_bc_ok = 0
-  local counter_C_dc_ok = 0
-  local counter_angle_ok = 0
-  local counter_unique = 0
-
+  local seen_parls = {}
   for A = 1, n do
     local segs_A = segs_by_dir[A]
     if segs_A then
-      -- Collect segments through A (with their direction keys).
-      local through_A = {}  -- list of {seg_idx, dir_key}
+      local through_A = {}
       for dk, sidx in pairs(segs_A) do
         through_A[#through_A + 1] = { sidx = sidx, dk = dk }
       end
@@ -270,39 +317,30 @@ function M.compute(points, reaches)
       for ii = 1, nA do
         local s1 = through_A[ii]
         local seg1 = segments[s1.sidx]
-        local pos_A_in_s1 = pole_to_pos[A][s1.sidx]
+        local pos_A_1 = pole_to_pos[A][s1.sidx]
         for jj = ii + 1, nA do
           local s2 = through_A[jj]
           local seg2 = segments[s2.sidx]
-          local pos_A_in_s2 = pole_to_pos[A][s2.sidx]
-          -- For each B in seg1 after A, each D in seg2 after A.
+          local pos_A_2 = pole_to_pos[A][s2.sidx]
           local poles1 = seg1.poles
           local poles2 = seg2.poles
-          for b_pos = pos_A_in_s1 + 1, #poles1 do
+          for b_pos = pos_A_1 + 1, #poles1 do
             local B = poles1[b_pos]
-            for d_pos = pos_A_in_s2 + 1, #poles2 do
+            for d_pos = pos_A_2 + 1, #poles2 do
               local D = poles2[d_pos]
-              counter_triples = counter_triples + 1
-              -- Compute C = B + D − A in integer space.
               local cix = pixs[B] + pixs[D] - pixs[A]
               local ciy = piys[B] + piys[D] - piys[A]
               local row_C = pos_to_idx[cix]
               local C = row_C and row_C[ciy]
               if C and C ~= A and C ~= B and C ~= D then
-                counter_C_real = counter_C_real + 1
-                -- Check (B, C) on a segment in s2's direction.
                 local seg_BC = segs_by_dir[B] and segs_by_dir[B][s2.dk]
                 if seg_BC then
-                  local pos_C_in_BC = pole_to_pos[C] and pole_to_pos[C][seg_BC]
-                  if pos_C_in_BC then
-                    counter_C_bc_ok = counter_C_bc_ok + 1
-                    -- Check (D, C) on a segment in s1's direction.
+                  local pos_C_BC = pole_to_pos[C] and pole_to_pos[C][seg_BC]
+                  if pos_C_BC then
                     local seg_DC = segs_by_dir[D] and segs_by_dir[D][s1.dk]
                     if seg_DC then
-                      local pos_C_in_DC = pole_to_pos[C] and pole_to_pos[C][seg_DC]
-                      if pos_C_in_DC then
-                        counter_C_dc_ok = counter_C_dc_ok + 1
-                        -- Angle filter (60°–120°): 4·dot² ≤ |a|²·|b|².
+                      local pos_C_DC = pole_to_pos[C] and pole_to_pos[C][seg_DC]
+                      if pos_C_DC then
                         local v_ab_x = pxs[B] - pxs[A]
                         local v_ab_y = pys[B] - pys[A]
                         local v_ad_x = pxs[D] - pxs[A]
@@ -311,16 +349,66 @@ function M.compute(points, reaches)
                         local lb2 = v_ad_x * v_ad_x + v_ad_y * v_ad_y
                         local dotv = v_ab_x * v_ad_x + v_ab_y * v_ad_y
                         if 4 * dotv * dotv <= la2 * lb2 then
-                          counter_angle_ok = counter_angle_ok + 1
-                          -- Canonical 4-tuple key (sorted) to dedupe.
                           local s = { A, B, C, D }
                           table.sort(s)
                           local key = s[1] .. "_" .. s[2] .. "_" .. s[3] .. "_" .. s[4]
                           if not seen_parls[key] then
                             seen_parls[key] = true
-                            counter_unique = counter_unique + 1
-                            -- (For now, just count. Full corners CCW + phase
-                            -- + bbox + acceptance comes in the next commit.)
+                            -- CCW corner ordering.
+                            local cross = v_ab_x * v_ad_y - v_ab_y * v_ad_x
+                            local corners
+                            local seg_AB = s1.sidx
+                            local seg_AD = s2.sidx
+                            -- side_segments[k] = segment of side from corners[k] to corners[k%4+1]
+                            local side_segments
+                            if cross > 0 then
+                              corners = { A, B, C, D }
+                              -- A→B on seg_AB, B→C on seg_BC, C→D on seg_DC, D→A on seg_AD
+                              side_segments = { seg_AB, seg_BC, seg_DC, seg_AD }
+                            else
+                              corners = { A, D, C, B }
+                              -- A→D on seg_AD, D→C on seg_DC, C→B on seg_BC, B→A on seg_AB
+                              side_segments = { seg_AD, seg_DC, seg_BC, seg_AB }
+                            end
+                            -- bbox
+                            local x1, y1 = pxs[corners[1]], pys[corners[1]]
+                            local x2, y2 = pxs[corners[2]], pys[corners[2]]
+                            local x3, y3 = pxs[corners[3]], pys[corners[3]]
+                            local x4, y4 = pxs[corners[4]], pys[corners[4]]
+                            local bxmin, bxmax = x1, x1
+                            if x2 < bxmin then bxmin = x2 end; if x2 > bxmax then bxmax = x2 end
+                            if x3 < bxmin then bxmin = x3 end; if x3 > bxmax then bxmax = x3 end
+                            if x4 < bxmin then bxmin = x4 end; if x4 > bxmax then bxmax = x4 end
+                            local bymin, bymax = y1, y1
+                            if y2 < bymin then bymin = y2 end; if y2 > bymax then bymax = y2 end
+                            if y3 < bymin then bymin = y3 end; if y3 > bymax then bymax = y3 end
+                            if y4 < bymin then bymin = y4 end; if y4 > bymax then bymax = y4 end
+                            -- phase
+                            local ax = x2 - x1
+                            local ay = y2 - y1
+                            local bx = x4 - x1
+                            local by = y4 - y1
+                            local eps_h = 1e-6
+                            local a_h = mabs(ay) < eps_h
+                            local a_v = mabs(ax) < eps_h
+                            local b_h = mabs(by) < eps_h
+                            local b_v = mabs(bx) < eps_h
+                            local has_h = a_h or b_h
+                            local has_v = a_v or b_v
+                            local phase
+                            if has_h and has_v then phase = 0
+                            elseif has_h then phase = 1
+                            elseif has_v then phase = 2
+                            else phase = 3 end
+                            local area = mabs(ax * by - ay * bx)
+                            candidates[#candidates + 1] = {
+                              corners = corners,
+                              side_segments = side_segments,
+                              area = area,
+                              phase = phase,
+                              bxmin = bxmin, bxmax = bxmax,
+                              bymin = bymin, bymax = bymax,
+                            }
                           end
                         end
                       end
@@ -335,15 +423,142 @@ function M.compute(points, reaches)
     end
   end
   stats.t_parls.stop()
+  stats.candidate_count = #candidates
 
-  stats.triples = counter_triples
-  stats.C_real = counter_C_real
-  stats.C_bc_ok = counter_C_bc_ok
-  stats.C_dc_ok = counter_C_dc_ok
-  stats.angle_ok = counter_angle_ok
-  stats.unique_parls = counter_unique
+  -- ---- phase loop / acceptance ----
+  stats.t_accept = game.create_profiler()
+  local phases = { {}, {}, {}, {} }
+  for _, p in ipairs(candidates) do
+    local ph = p.phase + 1
+    phases[ph][#phases[ph] + 1] = p
+  end
+  for ph = 1, 4 do
+    table.sort(phases[ph], function(a, b) return a.area < b.area end)
+  end
+  local accepted = {}
+  for ph = 1, 4 do
+    for _, P in ipairs(phases[ph]) do
+      local conflict = false
+      local p_bxmin, p_bxmax = P.bxmin, P.bxmax
+      local p_bymin, p_bymax = P.bymin, P.bymax
+      for _, Q in ipairs(accepted) do
+        if p_bxmin <= Q.bxmax and p_bxmax >= Q.bxmin
+           and p_bymin <= Q.bymax and p_bymax >= Q.bymin then
+          if quads_overlap(P.corners, Q.corners, pxs, pys) then
+            conflict = true
+            break
+          end
+        end
+      end
+      if not conflict then
+        accepted[#accepted + 1] = P
+      end
+    end
+  end
+  stats.t_accept.stop()
+  stats.accepted_count = #accepted
 
-  return candidates, stats
+  -- ---- edge generation from accepted parl sides ----
+  stats.t_edges = game.create_profiler()
+  local edges = {}
+  local edge_set = {}
+  local edge_segs = {}
+  local parent = {}
+  for i = 1, n do parent[i] = i end
+  local function find(x)
+    local root = x
+    while parent[root] ~= root do root = parent[root] end
+    while parent[x] ~= root do
+      local pn = parent[x]; parent[x] = root; x = pn
+    end
+    return root
+  end
+  local function add_edge(a, b)
+    local k = a < b and (a .. "_" .. b) or (b .. "_" .. a)
+    if edge_set[k] then return false end
+    edge_set[k] = true
+    edges[#edges + 1] = { a, b }
+    edge_segs[#edge_segs + 1] = { pxs[a], pys[a], pxs[b], pys[b] }
+    local ra, rb = find(a), find(b)
+    if ra ~= rb then parent[ra] = rb end
+    return true
+  end
+
+  for _, P in ipairs(accepted) do
+    for k = 1, 4 do
+      local a = P.corners[k]
+      local b = P.corners[(k % 4) + 1]
+      local seg_idx = P.side_segments[k]
+      local seg = segments[seg_idx]
+      local pa = pole_to_pos[a][seg_idx]
+      local pb = pole_to_pos[b][seg_idx]
+      if pa > pb then pa, pb = pb, pa end
+      for q = pa, pb - 1 do
+        add_edge(seg.poles[q], seg.poles[q + 1])
+      end
+    end
+  end
+  stats.t_edges.stop()
+  stats.edges_from_parls = #edges
+
+  -- ---- MST closure for connectivity ----
+  stats.t_mst = game.create_profiler()
+  local mst_candidates = {}
+  for i = 1, n do
+    local pi = points[i]
+    local ri = reaches[i]
+    local cx_min = mfloor((pi.x - ri) / cell_size)
+    local cx_max = mfloor((pi.x + ri) / cell_size)
+    local cy_min = mfloor((pi.y - ri) / cell_size)
+    local cy_max = mfloor((pi.y + ri) / cell_size)
+    for cx = cx_min, cx_max do
+      local row = point_bucket[cx]
+      if row then
+        for cy = cy_min, cy_max do
+          local cell = row[cy]
+          if cell then
+            for _, j in ipairs(cell) do
+              if j > i then
+                local pj = points[j]
+                local dx = pj.x - pi.x
+                local dy = pj.y - pi.y
+                local d2 = dx * dx + dy * dy
+                local rj = reaches[j]
+                local r = ri < rj and ri or rj
+                if d2 <= r * r then
+                  mst_candidates[#mst_candidates + 1] =
+                    { d2 = d2, i = i, j = j }
+                end
+              end
+            end
+          end
+        end
+      end
+    end
+  end
+  table.sort(mst_candidates, function(a, b) return a.d2 < b.d2 end)
+
+  for _, e in ipairs(mst_candidates) do
+    if find(e.i) ~= find(e.j) then
+      local k = e.i < e.j and (e.i .. "_" .. e.j) or (e.j .. "_" .. e.i)
+      if not edge_set[k] then
+        local nx1, ny1 = pxs[e.i], pys[e.i]
+        local nx2, ny2 = pxs[e.j], pys[e.j]
+        local crosses = false
+        for _, old in ipairs(edge_segs) do
+          if segs_intersect(nx1, ny1, nx2, ny2,
+                            old[1], old[2], old[3], old[4]) then
+            crosses = true; break
+          end
+        end
+        if not crosses then add_edge(e.i, e.j) end
+      end
+    end
+  end
+  stats.t_mst.stop()
+  stats.total_edges = #edges
+
+  return edges, accepted, candidates, stats
 end
 
 return M
