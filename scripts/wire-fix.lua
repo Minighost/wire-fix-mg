@@ -152,9 +152,6 @@ function M.run(player_index, entities)
       "    pair_checks=%d  angle_pass=%d  chain_calls=%d  chain_success=%d",
       v18_stats.pair_checks or 0, v18_stats.angle_pass or 0,
       v18_stats.chain_calls or 0, v18_stats.chain_success or 0))
-    player.print({"",
-      "    chain_total=", v18_stats.t_chain,
-      "  pos_seg_total=", v18_stats.t_pos_seg})
     player.print(string.format(
       "    cache hits=%d misses=%d  side: short=%d medium=%d long=%d",
       v18_stats.cache_hits or 0, v18_stats.cache_misses or 0,

@@ -153,21 +153,13 @@ function M.compute(points, reaches)
   local pos_seg_seen_count = 0
   local pos_seg_seen_keys = {}
 
-  -- Diagnostic-only counters / sub-profilers. Not load-bearing — reading
-  -- their values doesn't change algorithm output. LuaProfiler has no
-  -- start()/resume; the .add() pattern below creates a fresh profiler per
-  -- call and merges its elapsed into the accumulator.
+  -- Diagnostic counters (cheap, kept on). Reading them doesn't change
+  -- algorithm output.
   local cache_hits = 0
   local cache_misses = 0
   local chain_short = 0   -- side² ≤ pair_reach²
   local chain_medium = 0  -- pair_reach² < side² ≤ 4·pair_reach²
   local chain_long = 0    -- side² > 4·pair_reach²
-  local t_chain = game.create_profiler()
-  t_chain.reset()
-  t_chain.stop()
-  local t_pos_seg = game.create_profiler()
-  t_pos_seg.reset()
-  t_pos_seg.stop()
 
   -- Per-pole reach squared, so make_chain can compare squared lengths and
   -- skip the per-segment math.sqrt.
@@ -181,7 +173,6 @@ function M.compute(points, reaches)
   -- Fills pos_seg_ts[] / pos_seg_ks[] with collinear interior points of
   -- segment i—j, sorted by t in [0, 1]. Returns the count.
   local function points_on_segment_strict(i, j)
-    local _t = game.create_profiler()
     pos_seg_count = 0
     for si = 1, pos_seg_seen_count do
       pos_seg_seen[pos_seg_seen_keys[si]] = nil
@@ -193,7 +184,7 @@ function M.compute(points, reaches)
     local dx = pbx - pax
     local dy = pby - pay
     local L2 = dx * dx + dy * dy
-    if L2 < 1e-12 then _t.stop(); t_pos_seg.add(_t); return 0 end
+    if L2 < 1e-12 then return 0 end
     local minx, maxx = pax, pbx
     if minx > maxx then minx, maxx = maxx, minx end
     local miny, maxy = pay, pby
@@ -261,8 +252,6 @@ function M.compute(points, reaches)
       pos_seg_ks[sj + 1] = key_k
     end
 
-    _t.stop()
-    t_pos_seg.add(_t)
     return pos_seg_count
   end
 
@@ -318,11 +307,7 @@ function M.compute(points, reaches)
   local function make_chain(i, j)
     local lo, hi = i, j
     if lo > hi then lo, hi = hi, lo end
-    local _t = game.create_profiler()
-    local r = _make_chain_inner(lo, hi)
-    _t.stop()
-    t_chain.add(_t)
-    return r
+    return _make_chain_inner(lo, hi)
   end
 
   -- SAT-based parallelogram-on-parallelogram overlap test.
@@ -828,8 +813,6 @@ function M.compute(points, reaches)
   stats.chain_short = chain_short
   stats.chain_medium = chain_medium
   stats.chain_long = chain_long
-  stats.t_chain = t_chain
-  stats.t_pos_seg = t_pos_seg
 
   -- =========================================================
   -- Phase B: collect edges + Kruskal MST closure (with intersection check)
