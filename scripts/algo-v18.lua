@@ -278,6 +278,7 @@ function M.compute(points, reaches)
   local function enumerate_parls()
     if n < 4 then return {} end
 
+    stats.t_enum_insert = game.create_profiler()
     -- Hot loop: O(n²) midpoint pairs.
     --   * 2-level int tables avoid string-key allocation.
     --   * Pairs are packed as a single int (i * K + j); flat array storage.
@@ -322,7 +323,13 @@ function M.compute(points, reaches)
         end
       end
     end
+    stats.t_enum_insert.stop()
 
+    stats.t_enum_iterate = game.create_profiler()
+    local pair_checks = 0
+    local angle_pass = 0
+    local chain_calls = 0
+    local chain_success = 0
     local candidates = {}
     for _, ry_row in pairs(mid_groups) do
       for _, grp in pairs(ry_row) do
@@ -333,6 +340,7 @@ function M.compute(points, reaches)
             local a = mfloor(pa / K)
             local b = pa - a * K
             for pj = pi + 1, glen do
+              pair_checks = pair_checks + 1
               local pb = grp[pj]
               local c = mfloor(pb / K)
               local d = pb - c * K
@@ -348,6 +356,7 @@ function M.compute(points, reaches)
                 if la2 >= 1e-18 and lb2 >= 1e-18 then
                   local dotv = v_a_x * v_b_x + v_a_y * v_b_y
                   if 4 * dotv * dotv <= la2 * lb2 then
+                    angle_pass = angle_pass + 1
                     local corners_ccw
                     if cross_2d(v_a_x, v_a_y, v_b_x, v_b_y) > 0 then
                       corners_ccw = { i, j, b, k }
@@ -359,8 +368,10 @@ function M.compute(points, reaches)
                     for ci = 1, 4 do
                       local ea = corners_ccw[ci]
                       local eb = corners_ccw[(ci % 4) + 1]
+                      chain_calls = chain_calls + 1
                       local ch = make_chain(ea, eb)
                       if ch == nil then ok = false; break end
+                      chain_success = chain_success + 1
                       chains[ci] = ch
                     end
                     if ok then
@@ -385,6 +396,11 @@ function M.compute(points, reaches)
         end
       end
     end
+    stats.t_enum_iterate.stop()
+    stats.pair_checks = pair_checks
+    stats.angle_pass = angle_pass
+    stats.chain_calls = chain_calls
+    stats.chain_success = chain_success
     return candidates
   end
 

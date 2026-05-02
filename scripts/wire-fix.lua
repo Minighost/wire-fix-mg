@@ -146,9 +146,15 @@ function M.run(player_index, entities)
     player.print({"",
       "  setup=", v18_stats.t_setup,
       "  enumerate=", v18_stats.t_enumerate,
-      "  phase_loop=", v18_stats.t_phase_loop,
-      "  iso=", v18_stats.t_iso})
+      "    insert=", v18_stats.t_enum_insert,
+      "  iterate=", v18_stats.t_enum_iterate})
+    player.print(string.format(
+      "    pair_checks=%d  angle_pass=%d  chain_calls=%d  chain_success=%d",
+      v18_stats.pair_checks or 0, v18_stats.angle_pass or 0,
+      v18_stats.chain_calls or 0, v18_stats.chain_success or 0))
     player.print({"",
+      "  phase_loop=", v18_stats.t_phase_loop,
+      "  iso=", v18_stats.t_iso,
       "  pattern_edges=", v18_stats.t_pattern_edges,
       "  mst_cand=", v18_stats.t_mst_cand,
       "  mst_closure=", v18_stats.t_mst_closure})
