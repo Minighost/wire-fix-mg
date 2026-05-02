@@ -1,4 +1,5 @@
 local algo_v18 = require("scripts.algo-v18")
+local algo_segments = require("scripts.algo-segments")
 
 local M = {}
 
@@ -89,6 +90,12 @@ function M.run(player_index, entities)
   local v18_edges, v18_parls, v18_iso, v18_stats = algo_v18.compute(points, reaches)
   p_v18.stop()
 
+  -- Test-only: measure segment detection separately. Doesn't affect the
+  -- diff-apply below; just times the alternative approach for comparison.
+  local p_seg = game.create_profiler()
+  local seg_segments, seg_stats = algo_segments.detect_segments(points, reaches)
+  p_seg.stop()
+
   -- Phase 3: build wanted set keyed by pair_key(unit_number).
   local wanted = {}
   for _, edge in ipairs(v18_edges) do
@@ -156,6 +163,16 @@ function M.run(player_index, entities)
       "    cache hits=%d misses=%d  side: short=%d medium=%d long=%d",
       v18_stats.cache_hits or 0, v18_stats.cache_misses or 0,
       v18_stats.chain_short or 0, v18_stats.chain_medium or 0, v18_stats.chain_long or 0))
+    player.print({"",
+      "[seg test] total=", p_seg,
+      "  setup=", seg_stats.t_setup,
+      "  pairs=", seg_stats.t_pairs,
+      "  segments=", seg_stats.t_segments})
+    player.print(string.format(
+      "  pairs=%d  lines=%d  segments=%d  max_seg_len=%d  total_seg_poles=%d",
+      seg_stats.pair_count, seg_stats.line_count,
+      seg_stats.segment_count, seg_stats.max_seg_len,
+      seg_stats.total_segment_poles))
     player.print({"",
       "  phase_loop=", v18_stats.t_phase_loop,
       "  iso=", v18_stats.t_iso,
