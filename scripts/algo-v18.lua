@@ -445,15 +445,28 @@ function M.compute(points, reaches)
                     if ok then
                       local c1 = corners_ccw[1]
                       local c2 = corners_ccw[2]
+                      local c3 = corners_ccw[3]
                       local c4 = corners_ccw[4]
-                      local va_x = pxs[c2] - pxs[c1]
-                      local va_y = pys[c2] - pys[c1]
-                      local vb_x = pxs[c4] - pxs[c1]
-                      local vb_y = pys[c4] - pys[c1]
+                      local x1, x2, x3, x4 = pxs[c1], pxs[c2], pxs[c3], pxs[c4]
+                      local y1, y2, y3, y4 = pys[c1], pys[c2], pys[c3], pys[c4]
+                      local va_x = x2 - x1
+                      local va_y = y2 - y1
+                      local vb_x = x4 - x1
+                      local vb_y = y4 - y1
+                      local bxmin, bxmax = x1, x1
+                      if x2 < bxmin then bxmin = x2 end; if x2 > bxmax then bxmax = x2 end
+                      if x3 < bxmin then bxmin = x3 end; if x3 > bxmax then bxmax = x3 end
+                      if x4 < bxmin then bxmin = x4 end; if x4 > bxmax then bxmax = x4 end
+                      local bymin, bymax = y1, y1
+                      if y2 < bymin then bymin = y2 end; if y2 > bymax then bymax = y2 end
+                      if y3 < bymin then bymin = y3 end; if y3 > bymax then bymax = y3 end
+                      if y4 < bymin then bymin = y4 end; if y4 > bymax then bymax = y4 end
                       candidates[#candidates + 1] = {
                         corners = corners_ccw,
                         chains = chains,
                         area = mabs(cross_2d(va_x, va_y, vb_x, vb_y)),
+                        bxmin = bxmin, bxmax = bxmax,
+                        bymin = bymin, bymax = bymax,
                       }
                     end
                   end
@@ -541,17 +554,30 @@ function M.compute(points, reaches)
               chains[ci] = ch
             end
             if chains_ok then
-              local q1 = points[new_corners[1]]
-              local q2 = points[new_corners[2]]
-              local q4 = points[new_corners[4]]
-              local nva_x = q2.x - q1.x
-              local nva_y = q2.y - q1.y
-              local nvb_x = q4.x - q1.x
-              local nvb_y = q4.y - q1.y
+              local nc1 = new_corners[1]
+              local nc2 = new_corners[2]
+              local nc3 = new_corners[3]
+              local nc4 = new_corners[4]
+              local x1, x2, x3, x4 = pxs[nc1], pxs[nc2], pxs[nc3], pxs[nc4]
+              local y1, y2, y3, y4 = pys[nc1], pys[nc2], pys[nc3], pys[nc4]
+              local nva_x = x2 - x1
+              local nva_y = y2 - y1
+              local nvb_x = x4 - x1
+              local nvb_y = y4 - y1
+              local bxmin, bxmax = x1, x1
+              if x2 < bxmin then bxmin = x2 end; if x2 > bxmax then bxmax = x2 end
+              if x3 < bxmin then bxmin = x3 end; if x3 > bxmax then bxmax = x3 end
+              if x4 < bxmin then bxmin = x4 end; if x4 > bxmax then bxmax = x4 end
+              local bymin, bymax = y1, y1
+              if y2 < bymin then bymin = y2 end; if y2 > bymax then bymax = y2 end
+              if y3 < bymin then bymin = y3 end; if y3 > bymax then bymax = y3 end
+              if y4 < bymin then bymin = y4 end; if y4 > bymax then bymax = y4 end
               local new_P = {
                 corners = new_corners,
                 chains = chains,
                 area = mabs(cross_2d(nva_x, nva_y, nvb_x, nvb_y)),
+                bxmin = bxmin, bxmax = bxmax,
+                bymin = bymin, bymax = bymax,
               }
               seen[k] = true
               expanded[#expanded + 1] = new_P
@@ -681,13 +707,20 @@ function M.compute(points, reaches)
     for ph = 1, 4 do
       for _, P in ipairs(phases[ph]) do
         local conflict = false
+        local p_bxmin, p_bxmax = P.bxmin, P.bxmax
+        local p_bymin, p_bymax = P.bymin, P.bymax
         for _, Q in ipairs(primary_parls) do
-          if quads_overlap(P.corners, Q.corners) then conflict = true; break end
+          if p_bxmin <= Q.bxmax and p_bxmax >= Q.bxmin
+             and p_bymin <= Q.bymax and p_bymax >= Q.bymin then
+            if quads_overlap(P.corners, Q.corners) then conflict = true; break end
+          end
         end
         if not conflict then
           for _, Q in ipairs(expansion_parls) do
-            if quads_overlap(P.corners, Q.corners) then conflict = true; break end
-          end
+            if p_bxmin <= Q.bxmax and p_bxmax >= Q.bxmin
+               and p_bymin <= Q.bymax and p_bymax >= Q.bymin then
+              if quads_overlap(P.corners, Q.corners) then conflict = true; break end
+            end
         end
         if not conflict then
           primary_parls[#primary_parls + 1] = P
