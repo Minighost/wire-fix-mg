@@ -202,27 +202,41 @@ function M.compute(points, reaches)
     local cx2 = mfloor(maxx / cell_size)
     local cy1 = mfloor(miny / cell_size)
     local cy2 = mfloor(maxy / cell_size)
+
+    -- Cell-level pre-filter: a cell whose center is far enough from the
+    -- line cannot contain any pole within EPS_GEOM of it. With cell radius
+    -- r = cell_size · √2/2 (corner-to-center) and Cauchy-Schwarz on cv,
+    -- |cv(P) - cv(C)| ≤ r · L for any P in the cell, so skip the cell when
+    -- cv(C)² > (r·L + EPS_GEOM)². The EPS_GEOM cross term is negligible
+    -- at our scales, so we approximate by L² · r² with a 1% safety margin.
+    local cell_skip_threshold = L2 * cell_size * cell_size * 0.5 * 1.01
+
     for cx = cx1, cx2 do
       local row = point_bucket[cx]
       if row then
+        local cx_center = (cx + 0.5) * cell_size
         for cy = cy1, cy2 do
           local cell = row[cy]
           if cell then
-            for ki = 1, #cell do
-              local k = cell[ki]
-              if k ~= i and k ~= j and not pos_seg_seen[k] then
-                pos_seg_seen[k] = true
-                pos_seg_seen_count = pos_seg_seen_count + 1
-                pos_seg_seen_keys[pos_seg_seen_count] = k
-                local pkx = pxs[k]
-                local pky = pys[k]
-                local cv = (pkx - pax) * dy - (pky - pay) * dx
-                if mabs(cv) <= EPS_GEOM then
-                  local t = ((pkx - pax) * dx + (pky - pay) * dy) / L2
-                  if t > 1e-6 and t < 1 - 1e-6 then
-                    pos_seg_count = pos_seg_count + 1
-                    pos_seg_ts[pos_seg_count] = t
-                    pos_seg_ks[pos_seg_count] = k
+            local cy_center = (cy + 0.5) * cell_size
+            local cell_cv = (cx_center - pax) * dy - (cy_center - pay) * dx
+            if cell_cv * cell_cv <= cell_skip_threshold then
+              for ki = 1, #cell do
+                local k = cell[ki]
+                if k ~= i and k ~= j and not pos_seg_seen[k] then
+                  pos_seg_seen[k] = true
+                  pos_seg_seen_count = pos_seg_seen_count + 1
+                  pos_seg_seen_keys[pos_seg_seen_count] = k
+                  local pkx = pxs[k]
+                  local pky = pys[k]
+                  local cv = (pkx - pax) * dy - (pky - pay) * dx
+                  if mabs(cv) <= EPS_GEOM then
+                    local t = ((pkx - pax) * dx + (pky - pay) * dy) / L2
+                    if t > 1e-6 and t < 1 - 1e-6 then
+                      pos_seg_count = pos_seg_count + 1
+                      pos_seg_ts[pos_seg_count] = t
+                      pos_seg_ks[pos_seg_count] = k
+                    end
                   end
                 end
               end
