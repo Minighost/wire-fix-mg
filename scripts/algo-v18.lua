@@ -95,8 +95,14 @@ function M.compute(points, reaches)
 
   -- Pack (i, j) pairs into a single int via i * K + j so the hot midpoint
   -- loop can store pairs as ints in a flat array, dropping ~n² per-pair
-  -- {i, j} table allocations.
-  local K = n + 1
+  -- {i, j} table allocations. K is rounded up to a power of two so the
+  -- iterate phase can unpack with bit.rshift / bit.band instead of mfloor.
+  local K_shift = 0
+  local K = 1
+  while K < n + 1 do K = K + K; K_shift = K_shift + 1 end
+  local K_mask = K - 1
+  local brshift = bit.rshift
+  local bband = bit.band
 
   -- Flat coordinate arrays. The hot loops access pxs[i] / pys[i] (int-keyed
   -- array) instead of points[i].x (table-field hash lookup), which JITs into
@@ -461,25 +467,20 @@ function M.compute(points, reaches)
     --   * Singleton midpoints stay inline in mid_first as a raw int and only
     --     get promoted to a list in mid_groups when a second pair arrives,
     --     so the common (singleton) case never allocates a group table.
-    --   * pxs / pys are flat int-keyed arrays — one load instead of a
-    --     points[i].x table-field hash lookup.
+    --   * pixs / piys are int-keyed flat arrays in the canonical 4-decimal
+    --     fixed-point representation. The midpoint key is just the integer
+    --     sum (pixs[i] + pixs[j], piys[i] + piys[j]) — exactly twice the
+    --     midpoint in fixed-point, so two pairs with the same midpoint share
+    --     a key without any mfloor / sign branching.
     local mid_first = {}
     local mid_groups = {}
     for i = 1, n do
-      local pix = pxs[i]
-      local piy = pys[i]
+      local pix = pixs[i]
+      local piy = piys[i]
       local i_packed = i * K
       for j = i + 1, n do
-        local mx = pix + pxs[j]
-        local my = piy + pys[j]
-        local rx
-        if mx >= 0 then rx = mfloor(mx * ROUND_SCALE + 0.5)
-        else rx = -mfloor(-mx * ROUND_SCALE + 0.5)
-        end
-        local ry
-        if my >= 0 then ry = mfloor(my * ROUND_SCALE + 0.5)
-        else ry = -mfloor(-my * ROUND_SCALE + 0.5)
-        end
+        local rx = pix + pixs[j]
+        local ry = piy + piys[j]
         local packed = i_packed + j
         local row_f = mid_first[rx]
         if not row_f then row_f = {}; mid_first[rx] = row_f end
@@ -513,13 +514,13 @@ function M.compute(points, reaches)
         if glen >= 2 then
           for pi = 1, glen do
             local pa = grp[pi]
-            local a = mfloor(pa / K)
-            local b = pa - a * K
+            local a = brshift(pa, K_shift)
+            local b = bband(pa, K_mask)
             for pj = pi + 1, glen do
               pair_checks = pair_checks + 1
               local pb = grp[pj]
-              local c = mfloor(pb / K)
-              local d = pb - c * K
+              local c = brshift(pb, K_shift)
+              local d = bband(pb, K_mask)
               if a ~= c and a ~= d and b ~= c and b ~= d then
                 local i, j, k = a, c, d  -- l = b
                 local pix = pxs[i]; local piy = pys[i]
@@ -533,49 +534,57 @@ function M.compute(points, reaches)
                   local dotv = v_a_x * v_b_x + v_a_y * v_b_y
                   if 4 * dotv * dotv <= la2 * lb2 then
                     angle_pass = angle_pass + 1
-                    local corners_ccw
+                    -- Lazy alloc: keep CCW corner ids in locals while the
+                    -- four make_chain calls run; only allocate corners_ccw
+                    -- and chains tables when all four sides validate, so
+                    -- the ~83% of angle-pass candidates that fail the
+                    -- chain check don't pay for two table allocations.
+                    local cc1, cc2, cc3, cc4
                     if cross_2d(v_a_x, v_a_y, v_b_x, v_b_y) > 0 then
-                      corners_ccw = { i, j, b, k }
+                      cc1, cc2, cc3, cc4 = i, j, b, k
                     else
-                      corners_ccw = { i, k, b, j }
+                      cc1, cc2, cc3, cc4 = i, k, b, j
                     end
-                    local chains = {}
-                    local ok = true
-                    for ci = 1, 4 do
-                      local ea = corners_ccw[ci]
-                      local eb = corners_ccw[(ci % 4) + 1]
-                      chain_calls = chain_calls + 1
-                      local ch = make_chain(ea, eb)
-                      if ch == nil then ok = false; break end
+                    chain_calls = chain_calls + 1
+                    local ch1 = make_chain(cc1, cc2)
+                    if ch1 ~= nil then
                       chain_success = chain_success + 1
-                      chains[ci] = ch
-                    end
-                    if ok then
-                      local c1 = corners_ccw[1]
-                      local c2 = corners_ccw[2]
-                      local c3 = corners_ccw[3]
-                      local c4 = corners_ccw[4]
-                      local x1, x2, x3, x4 = pxs[c1], pxs[c2], pxs[c3], pxs[c4]
-                      local y1, y2, y3, y4 = pys[c1], pys[c2], pys[c3], pys[c4]
-                      local va_x = x2 - x1
-                      local va_y = y2 - y1
-                      local vb_x = x4 - x1
-                      local vb_y = y4 - y1
-                      local bxmin, bxmax = x1, x1
-                      if x2 < bxmin then bxmin = x2 end; if x2 > bxmax then bxmax = x2 end
-                      if x3 < bxmin then bxmin = x3 end; if x3 > bxmax then bxmax = x3 end
-                      if x4 < bxmin then bxmin = x4 end; if x4 > bxmax then bxmax = x4 end
-                      local bymin, bymax = y1, y1
-                      if y2 < bymin then bymin = y2 end; if y2 > bymax then bymax = y2 end
-                      if y3 < bymin then bymin = y3 end; if y3 > bymax then bymax = y3 end
-                      if y4 < bymin then bymin = y4 end; if y4 > bymax then bymax = y4 end
-                      candidates[#candidates + 1] = {
-                        corners = corners_ccw,
-                        chains = chains,
-                        area = mabs(cross_2d(va_x, va_y, vb_x, vb_y)),
-                        bxmin = bxmin, bxmax = bxmax,
-                        bymin = bymin, bymax = bymax,
-                      }
+                      chain_calls = chain_calls + 1
+                      local ch2 = make_chain(cc2, cc3)
+                      if ch2 ~= nil then
+                        chain_success = chain_success + 1
+                        chain_calls = chain_calls + 1
+                        local ch3 = make_chain(cc3, cc4)
+                        if ch3 ~= nil then
+                          chain_success = chain_success + 1
+                          chain_calls = chain_calls + 1
+                          local ch4 = make_chain(cc4, cc1)
+                          if ch4 ~= nil then
+                            chain_success = chain_success + 1
+                            local x1, x2, x3, x4 = pxs[cc1], pxs[cc2], pxs[cc3], pxs[cc4]
+                            local y1, y2, y3, y4 = pys[cc1], pys[cc2], pys[cc3], pys[cc4]
+                            local va_x = x2 - x1
+                            local va_y = y2 - y1
+                            local vb_x = x4 - x1
+                            local vb_y = y4 - y1
+                            local bxmin, bxmax = x1, x1
+                            if x2 < bxmin then bxmin = x2 end; if x2 > bxmax then bxmax = x2 end
+                            if x3 < bxmin then bxmin = x3 end; if x3 > bxmax then bxmax = x3 end
+                            if x4 < bxmin then bxmin = x4 end; if x4 > bxmax then bxmax = x4 end
+                            local bymin, bymax = y1, y1
+                            if y2 < bymin then bymin = y2 end; if y2 > bymax then bymax = y2 end
+                            if y3 < bymin then bymin = y3 end; if y3 > bymax then bymax = y3 end
+                            if y4 < bymin then bymin = y4 end; if y4 > bymax then bymax = y4 end
+                            candidates[#candidates + 1] = {
+                              corners = { cc1, cc2, cc3, cc4 },
+                              chains = { ch1, ch2, ch3, ch4 },
+                              area = mabs(cross_2d(va_x, va_y, vb_x, vb_y)),
+                              bxmin = bxmin, bxmax = bxmax,
+                              bymin = bymin, bymax = bymax,
+                            }
+                          end
+                        end
+                      end
                     end
                   end
                 end
