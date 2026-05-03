@@ -33,7 +33,6 @@ local M = {}
 
 local EPS = 1e-9
 local EPS_GEOM = 1e-6
-local EPS_ISO = 1e-4       -- linear tolerance: |d_short - la| < EPS_ISO  or  |d_short - lb| < EPS_ISO
 local ROUND_SCALE = 10000  -- 4-decimal precision
 local mfloor = math.floor
 local mabs = math.abs
@@ -453,105 +452,6 @@ function M.compute(points, reaches, opts)
     return true
   end
 
-  -- iso bookkeeping. seen_iso dedupes by canonical triangle key.
-  local accepted_iso_tris = {}
-  local seen_iso = {}
-
-  -- If short diagonal == one of the parallelogram's sides, split into two
-  -- isosceles triangles via the short diagonal and try point-symmetric
-  -- reflection across each outer equal side to find a sibling triangle.
-  -- Works on raw corners (CCW order: c0—c1—c2—c3), no parl object needed.
-  -- Adds discovered triangles to accepted_iso_tris with seen_iso dedup.
-  -- Trigger geometry: |d_short - la| < EPS_ISO  or  |d_short - lb| < EPS_ISO.
-  local function try_iso_split_corners(c0, c1, c2, c3)
-    local p0 = points[c0]
-    local p1 = points[c1]
-    local p2 = points[c2]
-    local p3 = points[c3]
-    local la = dist(p0.x, p0.y, p1.x, p1.y)
-    local lb = dist(p0.x, p0.y, p3.x, p3.y)
-    local d_diag1 = dist(p0.x, p0.y, p2.x, p2.y)
-    local d_diag2 = dist(p1.x, p1.y, p3.x, p3.y)
-    local short_a, short_b, diag_len
-    if d_diag1 <= d_diag2 then
-      short_a, short_b, diag_len = c0, c2, d_diag1
-    else
-      short_a, short_b, diag_len = c1, c3, d_diag2
-    end
-    if not (mabs(diag_len - la) < EPS_ISO or mabs(diag_len - lb) < EPS_ISO) then
-      return
-    end
-
-    local tri1, tri2
-    if short_a == c0 then
-      tri1 = { c0, c1, c2 }
-      tri2 = { c0, c2, c3 }
-    else
-      tri1 = { c1, c2, c3 }
-      tri2 = { c0, c1, c3 }
-    end
-
-    -- Add the two split triangles directly.
-    local k1 = tri_key(tri1[1], tri1[2], tri1[3])
-    if not seen_iso[k1] then
-      seen_iso[k1] = true
-      accepted_iso_tris[#accepted_iso_tris + 1] = tri1
-    end
-    local k2 = tri_key(tri2[1], tri2[2], tri2[3])
-    if not seen_iso[k2] then
-      seen_iso[k2] = true
-      accepted_iso_tris[#accepted_iso_tris + 1] = tri2
-    end
-
-    local triangles = { tri1, tri2 }
-    for _, T in ipairs(triangles) do
-      local t1, t2, t3 = T[1], T[2], T[3]
-      local q1, q2, q3 = points[t1], points[t2], points[t3]
-      local d01 = dist(q1.x, q1.y, q2.x, q2.y)
-      local d12 = dist(q2.x, q2.y, q3.x, q3.y)
-      local d02 = dist(q1.x, q1.y, q3.x, q3.y)
-      local iso_v, base_a, base_b
-      if mabs(d01 - d12) < EPS_ISO then
-        iso_v, base_a, base_b = t2, t1, t3
-      elseif mabs(d01 - d02) < EPS_ISO then
-        iso_v, base_a, base_b = t1, t2, t3
-      elseif mabs(d12 - d02) < EPS_ISO then
-        iso_v, base_a, base_b = t3, t1, t2
-      end
-      if iso_v then
-        for pair_idx = 1, 2 do
-          local out_v_a = iso_v
-          local out_v_b, opp
-          if pair_idx == 1 then out_v_b, opp = base_a, base_b
-          else out_v_b, opp = base_b, base_a
-          end
-          local oa, ob, op = points[out_v_a], points[out_v_b], points[opp]
-          local mx = oa.x + ob.x - op.x
-          local my = oa.y + ob.y - op.y
-          local rx, ry = vec_round_xy(mx, my)
-          local row = pos_to_idx[rx]
-          local X = row and row[ry]
-          if X and X ~= out_v_a and X ~= out_v_b and X ~= opp then
-            local px = points[X]
-            local d_oa_X = dist(oa.x, oa.y, px.x, px.y)
-            local d_ob_X = dist(ob.x, ob.y, px.x, px.y)
-            local d_oa_ob = dist(oa.x, oa.y, ob.x, ob.y)
-            if d_oa_X <= pair_reach(out_v_a, X)
-               and d_ob_X <= pair_reach(out_v_b, X)
-               and d_oa_ob <= pair_reach(out_v_a, out_v_b) then
-              local sib = { out_v_a, out_v_b, X }
-              local ks = tri_key(sib[1], sib[2], sib[3])
-              if not seen_iso[ks] then
-                seen_iso[ks] = true
-                accepted_iso_tris[#accepted_iso_tris + 1] = sib
-              end
-            end
-          end
-        end
-      end
-    end
-  end
-
   -- Enumerate parallelogram candidates over the full pole set.
   -- Two pairs sharing a midpoint = diagonals of a parallelogram.
   -- Filter: short diagonal length ≥ both side lengths
@@ -813,7 +713,88 @@ function M.compute(points, reaches, opts)
     return expanded
   end
 
+  -- If short diagonal == one of the sides, split P into two isosceles
+  -- triangles. For each triangle, try point-symmetric reflection across
+  -- each outer side to find a sibling triangle.
+  local function try_isosceles_split(P)
+    local c0, c1, c2, c3 = P.corners[1], P.corners[2], P.corners[3], P.corners[4]
+    local p0 = points[c0]
+    local p1 = points[c1]
+    local p2 = points[c2]
+    local p3 = points[c3]
+    local la = dist(p0.x, p0.y, p1.x, p1.y)
+    local lb = dist(p0.x, p0.y, p3.x, p3.y)
+    local d_diag1 = dist(p0.x, p0.y, p2.x, p2.y)
+    local d_diag2 = dist(p1.x, p1.y, p3.x, p3.y)
+    local short_a, short_b, diag_len
+    if d_diag1 <= d_diag2 then
+      short_a, short_b, diag_len = c0, c2, d_diag1
+    else
+      short_a, short_b, diag_len = c1, c3, d_diag2
+    end
+    if not (mabs(diag_len - la) < 1e-4 or mabs(diag_len - lb) < 1e-4) then
+      return {}
+    end
+
+    local tri1, tri2
+    if short_a == c0 then
+      tri1 = { c0, c1, c2 }
+      tri2 = { c0, c2, c3 }
+    else
+      tri1 = { c1, c2, c3 }
+      tri2 = { c0, c1, c3 }
+    end
+
+    local result = { tri1, tri2 }
+    local triangles = { tri1, tri2 }
+
+    for _, T in ipairs(triangles) do
+      local t1, t2, t3 = T[1], T[2], T[3]
+      local q1, q2, q3 = points[t1], points[t2], points[t3]
+      local d01 = dist(q1.x, q1.y, q2.x, q2.y)
+      local d12 = dist(q2.x, q2.y, q3.x, q3.y)
+      local d02 = dist(q1.x, q1.y, q3.x, q3.y)
+      local iso_v, base_a, base_b
+      if mabs(d01 - d12) < 1e-4 then
+        iso_v, base_a, base_b = t2, t1, t3
+      elseif mabs(d01 - d02) < 1e-4 then
+        iso_v, base_a, base_b = t1, t2, t3
+      elseif mabs(d12 - d02) < 1e-4 then
+        iso_v, base_a, base_b = t3, t1, t2
+      end
+      if iso_v then
+        for pair_idx = 1, 2 do
+          local out_v_a = iso_v
+          local out_v_b, opp
+          if pair_idx == 1 then out_v_b, opp = base_a, base_b
+          else out_v_b, opp = base_b, base_a
+          end
+          local oa, ob, op = points[out_v_a], points[out_v_b], points[opp]
+          local mx = oa.x + ob.x - op.x
+          local my = oa.y + ob.y - op.y
+          local rx, ry = vec_round_xy(mx, my)
+          local row = pos_to_idx[rx]
+          local X = row and row[ry]
+          if X and X ~= out_v_a and X ~= out_v_b and X ~= opp then
+            local px = points[X]
+            local d_oa_X = dist(oa.x, oa.y, px.x, px.y)
+            local d_ob_X = dist(ob.x, ob.y, px.x, px.y)
+            local d_oa_ob = dist(oa.x, oa.y, ob.x, ob.y)
+            if d_oa_X <= pair_reach(out_v_a, X)
+               and d_ob_X <= pair_reach(out_v_b, X)
+               and d_oa_ob <= pair_reach(out_v_a, out_v_b) then
+              result[#result + 1] = { out_v_a, out_v_b, X }
+            end
+          end
+        end
+      end
+    end
+    return result
+  end
+
   local accepted_parls = {}
+  local accepted_iso_tris = {}
+  local seen_iso = {}
 
   -- Phase-ordered detection: rectangles → axis-aligned → diagonal.
   -- Within each phase, area asc; primary acceptance requires no overlap
@@ -889,18 +870,24 @@ function M.compute(points, reaches, opts)
     stats.expansion = #expansion_parls
     stats.t_phase_loop.stop()
 
-    -- iso pass over ALL chain-validated candidates (not just accepted parls).
-    -- Phase ordering / SAT non-overlap rejects many candidates from being
-    -- wired as parallelograms, but their iso siblings are still useful — a
-    -- triangle reflection can land on a pole that no accepted parl reaches.
-    -- Cascade-expanded parls aren't in the candidates list, so cover them
-    -- separately below. seen_iso dedupes triangles across both sources.
     stats.t_iso = game.create_profiler()
-    for _, P in ipairs(candidates) do
-      try_iso_split_corners(P.corners[1], P.corners[2], P.corners[3], P.corners[4])
+    for _, P in ipairs(primary_parls) do
+      for _, T in ipairs(try_isosceles_split(P)) do
+        local k = tri_key(T[1], T[2], T[3])
+        if not seen_iso[k] then
+          seen_iso[k] = true
+          accepted_iso_tris[#accepted_iso_tris + 1] = T
+        end
+      end
     end
     for _, P in ipairs(expansion_parls) do
-      try_iso_split_corners(P.corners[1], P.corners[2], P.corners[3], P.corners[4])
+      for _, T in ipairs(try_isosceles_split(P)) do
+        local k = tri_key(T[1], T[2], T[3])
+        if not seen_iso[k] then
+          seen_iso[k] = true
+          accepted_iso_tris[#accepted_iso_tris + 1] = T
+        end
+      end
     end
     stats.t_iso.stop()
   end
