@@ -148,10 +148,6 @@ function M.run(player_index, entities)
       "  enumerate=", v18_stats.t_enumerate,
       "    insert=", v18_stats.t_enum_insert,
       "  iterate=", v18_stats.t_enum_iterate})
-    player.print({"",
-      "      distinct=", v18_stats.t_iter_distinct,
-      "  angle=", v18_stats.t_iter_angle,
-      "  chain=", v18_stats.t_iter_chain})
     player.print(string.format(
       "    pair_checks=%d  angle_pass=%d  chain_calls=%d  chain_success=%d",
       v18_stats.pair_checks or 0, v18_stats.angle_pass or 0,
