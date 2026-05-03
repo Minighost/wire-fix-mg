@@ -501,16 +501,35 @@ function M.compute(points, reaches)
     end
     stats.t_enum_insert.stop()
 
+    -- Iterate the midpoint groups in three explicit stages so we can time
+    -- each one cumulatively per group. Stage A filters by 4-distinct corners
+    -- into a flat scratch buffer, stage B filters by 60–120° side angle into
+    -- a second buffer, stage C runs the four chain_calls and registers the
+    -- candidate. The intermediate buffers are reused across all groups, so
+    -- the only added per-pair cost vs. the inlined version is a few flat
+    -- array writes / reads. Output (candidate set + order within a group)
+    -- is identical to the original inlined loop.
     stats.t_enum_iterate = game.create_profiler()
+    stats.t_iter_distinct = game.create_profiler(); stats.t_iter_distinct.stop()
+    stats.t_iter_angle = game.create_profiler(); stats.t_iter_angle.stop()
+    stats.t_iter_chain = game.create_profiler(); stats.t_iter_chain.stop()
     local pair_checks = 0
     local angle_pass = 0
     local chain_calls = 0
     local chain_success = 0
     local candidates = {}
+    -- Scratch: 4 ints (a, b, c, d) per pair that survived 4-distinct.
+    local distinct_buf = {}
+    -- Scratch: 8 numbers (i, j, b, k, v_a_x, v_a_y, v_b_x, v_b_y) per pair
+    -- that survived the angle filter.
+    local angle_buf = {}
     for _, ry_row in pairs(mid_groups) do
       for _, grp in pairs(ry_row) do
         local glen = #grp
         if glen >= 2 then
+          -- Stage A: extract (a, b, c, d) and 4-distinct check.
+          local tA = game.create_profiler()
+          local distinct_count = 0
           for pi = 1, glen do
             local pa = grp[pi]
             local a = mfloor(pa / K)
@@ -521,67 +540,111 @@ function M.compute(points, reaches)
               local c = mfloor(pb / K)
               local d = pb - c * K
               if a ~= c and a ~= d and b ~= c and b ~= d then
-                local i, j, k = a, c, d  -- l = b
-                local pix = pxs[i]; local piy = pys[i]
-                local v_a_x = pxs[j] - pix
-                local v_a_y = pys[j] - piy
-                local v_b_x = pxs[k] - pix
-                local v_b_y = pys[k] - piy
-                local la2 = v_a_x * v_a_x + v_a_y * v_a_y
-                local lb2 = v_b_x * v_b_x + v_b_y * v_b_y
-                if la2 >= 1e-18 and lb2 >= 1e-18 then
-                  local dotv = v_a_x * v_b_x + v_a_y * v_b_y
-                  if 4 * dotv * dotv <= la2 * lb2 then
-                    angle_pass = angle_pass + 1
-                    local corners_ccw
-                    if cross_2d(v_a_x, v_a_y, v_b_x, v_b_y) > 0 then
-                      corners_ccw = { i, j, b, k }
-                    else
-                      corners_ccw = { i, k, b, j }
-                    end
-                    local chains = {}
-                    local ok = true
-                    for ci = 1, 4 do
-                      local ea = corners_ccw[ci]
-                      local eb = corners_ccw[(ci % 4) + 1]
-                      chain_calls = chain_calls + 1
-                      local ch = make_chain(ea, eb)
-                      if ch == nil then ok = false; break end
-                      chain_success = chain_success + 1
-                      chains[ci] = ch
-                    end
-                    if ok then
-                      local c1 = corners_ccw[1]
-                      local c2 = corners_ccw[2]
-                      local c3 = corners_ccw[3]
-                      local c4 = corners_ccw[4]
-                      local x1, x2, x3, x4 = pxs[c1], pxs[c2], pxs[c3], pxs[c4]
-                      local y1, y2, y3, y4 = pys[c1], pys[c2], pys[c3], pys[c4]
-                      local va_x = x2 - x1
-                      local va_y = y2 - y1
-                      local vb_x = x4 - x1
-                      local vb_y = y4 - y1
-                      local bxmin, bxmax = x1, x1
-                      if x2 < bxmin then bxmin = x2 end; if x2 > bxmax then bxmax = x2 end
-                      if x3 < bxmin then bxmin = x3 end; if x3 > bxmax then bxmax = x3 end
-                      if x4 < bxmin then bxmin = x4 end; if x4 > bxmax then bxmax = x4 end
-                      local bymin, bymax = y1, y1
-                      if y2 < bymin then bymin = y2 end; if y2 > bymax then bymax = y2 end
-                      if y3 < bymin then bymin = y3 end; if y3 > bymax then bymax = y3 end
-                      if y4 < bymin then bymin = y4 end; if y4 > bymax then bymax = y4 end
-                      candidates[#candidates + 1] = {
-                        corners = corners_ccw,
-                        chains = chains,
-                        area = mabs(cross_2d(va_x, va_y, vb_x, vb_y)),
-                        bxmin = bxmin, bxmax = bxmax,
-                        bymin = bymin, bymax = bymax,
-                      }
-                    end
-                  end
-                end
+                local off = distinct_count * 4
+                distinct_buf[off + 1] = a
+                distinct_buf[off + 2] = b
+                distinct_buf[off + 3] = c
+                distinct_buf[off + 4] = d
+                distinct_count = distinct_count + 1
               end
             end
           end
+          tA.stop(); stats.t_iter_distinct.add(tA)
+
+          -- Stage B: vector compute + 60–120° angle filter.
+          local tB = game.create_profiler()
+          local angle_count = 0
+          for di = 0, distinct_count - 1 do
+            local off = di * 4
+            local a = distinct_buf[off + 1]
+            local b = distinct_buf[off + 2]
+            local c = distinct_buf[off + 3]
+            local d = distinct_buf[off + 4]
+            local i, j, k = a, c, d  -- l = b
+            local pix = pxs[i]; local piy = pys[i]
+            local v_a_x = pxs[j] - pix
+            local v_a_y = pys[j] - piy
+            local v_b_x = pxs[k] - pix
+            local v_b_y = pys[k] - piy
+            local la2 = v_a_x * v_a_x + v_a_y * v_a_y
+            local lb2 = v_b_x * v_b_x + v_b_y * v_b_y
+            if la2 >= 1e-18 and lb2 >= 1e-18 then
+              local dotv = v_a_x * v_b_x + v_a_y * v_b_y
+              if 4 * dotv * dotv <= la2 * lb2 then
+                angle_pass = angle_pass + 1
+                local off2 = angle_count * 8
+                angle_buf[off2 + 1] = i
+                angle_buf[off2 + 2] = j
+                angle_buf[off2 + 3] = b
+                angle_buf[off2 + 4] = k
+                angle_buf[off2 + 5] = v_a_x
+                angle_buf[off2 + 6] = v_a_y
+                angle_buf[off2 + 7] = v_b_x
+                angle_buf[off2 + 8] = v_b_y
+                angle_count = angle_count + 1
+              end
+            end
+          end
+          tB.stop(); stats.t_iter_angle.add(tB)
+
+          -- Stage C: 4 chain_calls + candidate registration.
+          local tC = game.create_profiler()
+          for ai = 0, angle_count - 1 do
+            local off = ai * 8
+            local i = angle_buf[off + 1]
+            local j = angle_buf[off + 2]
+            local b = angle_buf[off + 3]
+            local k = angle_buf[off + 4]
+            local v_a_x = angle_buf[off + 5]
+            local v_a_y = angle_buf[off + 6]
+            local v_b_x = angle_buf[off + 7]
+            local v_b_y = angle_buf[off + 8]
+            local corners_ccw
+            if cross_2d(v_a_x, v_a_y, v_b_x, v_b_y) > 0 then
+              corners_ccw = { i, j, b, k }
+            else
+              corners_ccw = { i, k, b, j }
+            end
+            local chains = {}
+            local ok = true
+            for ci = 1, 4 do
+              local ea = corners_ccw[ci]
+              local eb = corners_ccw[(ci % 4) + 1]
+              chain_calls = chain_calls + 1
+              local ch = make_chain(ea, eb)
+              if ch == nil then ok = false; break end
+              chain_success = chain_success + 1
+              chains[ci] = ch
+            end
+            if ok then
+              local c1 = corners_ccw[1]
+              local c2 = corners_ccw[2]
+              local c3 = corners_ccw[3]
+              local c4 = corners_ccw[4]
+              local x1, x2, x3, x4 = pxs[c1], pxs[c2], pxs[c3], pxs[c4]
+              local y1, y2, y3, y4 = pys[c1], pys[c2], pys[c3], pys[c4]
+              local va_x = x2 - x1
+              local va_y = y2 - y1
+              local vb_x = x4 - x1
+              local vb_y = y4 - y1
+              local bxmin, bxmax = x1, x1
+              if x2 < bxmin then bxmin = x2 end; if x2 > bxmax then bxmax = x2 end
+              if x3 < bxmin then bxmin = x3 end; if x3 > bxmax then bxmax = x3 end
+              if x4 < bxmin then bxmin = x4 end; if x4 > bxmax then bxmax = x4 end
+              local bymin, bymax = y1, y1
+              if y2 < bymin then bymin = y2 end; if y2 > bymax then bymax = y2 end
+              if y3 < bymin then bymin = y3 end; if y3 > bymax then bymax = y3 end
+              if y4 < bymin then bymin = y4 end; if y4 > bymax then bymax = y4 end
+              candidates[#candidates + 1] = {
+                corners = corners_ccw,
+                chains = chains,
+                area = mabs(cross_2d(va_x, va_y, vb_x, vb_y)),
+                bxmin = bxmin, bxmax = bxmax,
+                bymin = bymin, bymax = bymax,
+              }
+            end
+          end
+          tC.stop(); stats.t_iter_chain.add(tC)
         end
       end
     end
