@@ -332,24 +332,20 @@ function M.compute(points, reaches, opts)
 
   -- Cache make_chain results so duplicate sides across adjacent parl
   -- candidates don't redo the segment scan. Keyed canonically by (lo, hi)
-  -- because chain direction doesn't affect the resulting edge set. Rows
-  -- are pre-allocated so every chain_cache[lo] lookup hits a real table
-  -- and the hot path skips an "if not row" branch + row = {} allocation.
+  -- because chain direction doesn't affect the resulting edge set.
   local chain_cache = {}
-  for i = 1, n do chain_cache[i] = {} end
 
-  -- Combined wrapper: canonicalize (lo, hi) by pole index and run the
-  -- cache-miss path inline so each chain_call only crosses one Lua
-  -- function frame instead of two.
-  local function make_chain(i, j)
-    local lo, hi
-    if i < j then lo, hi = i, j else lo, hi = j, i end
+  local function _make_chain_inner(lo, hi)
     local row = chain_cache[lo]
-    local cached = row[hi]
-    if cached ~= nil then
-      cache_hits = cache_hits + 1
-      if cached == false then return nil end
-      return cached
+    if row then
+      local cached = row[hi]
+      if cached ~= nil then
+        cache_hits = cache_hits + 1
+        if cached == false then return nil end
+        return cached
+      end
+    else
+      row = {}; chain_cache[lo] = row
     end
     cache_misses = cache_misses + 1
 
@@ -372,6 +368,12 @@ function M.compute(points, reaches, opts)
 
     row[hi] = chain
     return chain
+  end
+
+  local function make_chain(i, j)
+    local lo, hi = i, j
+    if lo > hi then lo, hi = hi, lo end
+    return _make_chain_inner(lo, hi)
   end
 
   -- SAT-based parallelogram-on-parallelogram overlap test.
