@@ -5,7 +5,7 @@ local M = {}
 local POLE_COPPER = defines.wire_connector_id.pole_copper
 local WIRE_ORIGIN = defines.wire_origin.player
 
-local config = {dev_mode = false}
+local config = {dev_mode = false, measure_skip_chain = false}
 local ok, local_config = pcall(require, "config-local")
 if ok and type(local_config) == "table" then
   for k, v in pairs(local_config) do config[k] = v end
@@ -86,7 +86,9 @@ function M.run(player_index, entities)
     points[i] = { x = p.position.x, y = p.position.y }
     reaches[i] = p.prototype.get_max_wire_distance(p.quality)
   end
-  local v18_edges, v18_parls, v18_iso, v18_stats = algo_v18.compute(points, reaches)
+  local v18_edges, v18_parls, v18_iso, v18_stats = algo_v18.compute(points, reaches, {
+    skip_chain_block = config.measure_skip_chain,
+  })
   p_v18.stop()
 
   -- Phase 3: build wanted set keyed by pair_key(unit_number).

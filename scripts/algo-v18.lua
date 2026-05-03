@@ -88,10 +88,17 @@ local function segs_intersect(p1x, p1y, p2x, p2y, p3x, p3y, p4x, p4y)
   return false
 end
 
-function M.compute(points, reaches)
+function M.compute(points, reaches, opts)
   local n = #points
   local stats = {}
   if n < 2 then return {}, {}, {}, stats end
+
+  -- Measurement A/B switch: when opts.skip_chain_block is true, the iterate
+  -- inner loop runs through pair_checks → distinct → vector → angle filter
+  -- but bypasses the four make_chain calls and candidate registration.
+  -- Output is broken (candidates = 0) but iterate time isolates non-chain
+  -- work. Subtract from the full run to get the chain + register cost.
+  local skip_chain_block = opts and opts.skip_chain_block
 
   -- Pack (i, j) pairs into a single int via i * K + j so the hot midpoint
   -- loop can store pairs as ints in a flat array, dropping ~n² per-pair
@@ -528,6 +535,7 @@ function M.compute(points, reaches)
                   local dotv = v_a_x * v_b_x + v_a_y * v_b_y
                   if 4 * dotv * dotv <= la2 * lb2 then
                     angle_pass = angle_pass + 1
+                    if not skip_chain_block then
                     -- Lazy alloc: keep CCW corner ids in locals while the
                     -- four make_chain calls run; only allocate corners_ccw
                     -- and chains tables when all four sides validate, so
@@ -580,6 +588,7 @@ function M.compute(points, reaches)
                         end
                       end
                     end
+                    end  -- if not skip_chain_block
                   end
                 end
               end
