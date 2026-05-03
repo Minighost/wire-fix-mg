@@ -95,14 +95,8 @@ function M.compute(points, reaches)
 
   -- Pack (i, j) pairs into a single int via i * K + j so the hot midpoint
   -- loop can store pairs as ints in a flat array, dropping ~n² per-pair
-  -- {i, j} table allocations. K is rounded up to a power of two so the
-  -- iterate phase can unpack with bit.rshift / bit.band instead of mfloor.
-  local K_shift = 0
-  local K = 1
-  while K < n + 1 do K = K + K; K_shift = K_shift + 1 end
-  local K_mask = K - 1
-  local brshift = bit.rshift
-  local bband = bit.band
+  -- {i, j} table allocations.
+  local K = n + 1
 
   -- Flat coordinate arrays. The hot loops access pxs[i] / pys[i] (int-keyed
   -- array) instead of points[i].x (table-field hash lookup), which JITs into
@@ -514,13 +508,13 @@ function M.compute(points, reaches)
         if glen >= 2 then
           for pi = 1, glen do
             local pa = grp[pi]
-            local a = brshift(pa, K_shift)
-            local b = bband(pa, K_mask)
+            local a = mfloor(pa / K)
+            local b = pa - a * K
             for pj = pi + 1, glen do
               pair_checks = pair_checks + 1
               local pb = grp[pj]
-              local c = brshift(pb, K_shift)
-              local d = bband(pb, K_mask)
+              local c = mfloor(pb / K)
+              local d = pb - c * K
               if a ~= c and a ~= d and b ~= c and b ~= d then
                 local i, j, k = a, c, d  -- l = b
                 local pix = pxs[i]; local piy = pys[i]
