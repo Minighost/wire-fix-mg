@@ -31,7 +31,8 @@ cascade 확장 → 이등변 보강 → MST closure)은 변경 없음. 코드 �
 | `0d9cf94` | mid_groups 평탄화 + `pa_x/pa_y` hoist | 212,607 | 183,302 | **+33s 회귀**, revert |
 | `feacde4` | 위 revert | — | — | |
 | [`6664e06`](../../../commit/6664e06) | side-bucket 진단 카운터 제거 | 131,037 | 109,236 | **−48s** |
-| [`0fe21d6`](../../../commit/0fe21d6) | chain_cache row 사전할당 + `make_chain` wrapper 제거 | (측정 대기) | — | |
+| `0fe21d6` | chain_cache row 사전할당 + `make_chain` wrapper 제거 | 140,679 | 116,767 | **+9s 회귀**, revert |
+| [`b936247`](../../../commit/b936247) | 위 revert | — | — | |
 
 총 누적: **620s → 131s, 약 4.7× 가속**.
 
@@ -139,17 +140,15 @@ trace 컴파일이 깨진 것으로 보임.
 **교훈**: "값싸고 진단용으로 남겨도 되는" 카운터가 실제로는 trace 효율을
 크게 떨어뜨릴 수 있음. 핫패스의 모든 상수가 아닌 일은 의심해볼 가치 있음.
 
-### 7. chain_cache row 사전할당 + make_chain wrapper 제거 (`0fe21d6`)
+### 7. chain_cache row 사전할당 + make_chain wrapper 제거 (`0fe21d6` → revert `b936247`)
 
-**문제**:
-- `_make_chain_inner` 진입마다 `local row = chain_cache[lo]; if row then ... else row = {}; chain_cache[lo] = row end`. 처음 lo가 보일 때마다 분기 + 빈 테이블 할당.
-- `make_chain → _make_chain_inner` 래퍼로 함수 frame 두 번.
+**의도**:
+- `_make_chain_inner` 진입마다 `local row = chain_cache[lo]; if row then ... else row = {}; chain_cache[lo] = row end`. 처음 lo가 보일 때마다 분기 + 빈 테이블 할당. 이걸 시작 시 `for i = 1, n do chain_cache[i] = {} end`로 사전할당해서 분기 제거.
+- `make_chain → _make_chain_inner` 두 함수를 하나로 합쳐 canonicalize도 inline. 함수 frame 1개 절약.
 
-**해결**:
-- 시작 시 `for i = 1, n do chain_cache[i] = {} end`. row 분기 제거.
-- 두 함수를 하나로 합쳐 canonicalize도 inline.
+**결과**: 131s → 140s (**+9s 회귀**). iterate +7s, insert +1.4s. 카운터 동일.
 
-**효과**: 측정 대기.
+**교훈**: lazy lookup이 즉시 hit 되는 패턴(첫 lo 이후 모두 hit)이라 LuaJIT이 이미 최적화하고 있었던 듯. 사전할당으로 모든 lo가 빈 테이블 룩업을 추가로 통과하면서 trace가 오히려 무거워졌을 가능성. wrapper inline도 비슷한 영향 추정.
 
 ## 패턴
 
