@@ -509,53 +509,44 @@ function M.compute(points, reaches, opts)
     local chain_calls = 0
     local chain_success = 0
     local candidates = {}
-    -- Flatten mid_groups to a numeric array of groups so the outer iteration
-    -- is a tight numeric for instead of two nested pairs() iterators (which
-    -- LuaJIT compiles less aggressively).
-    local flat_groups = {}
     for _, ry_row in pairs(mid_groups) do
       for _, grp in pairs(ry_row) do
-        if #grp >= 2 then flat_groups[#flat_groups + 1] = grp end
-      end
-    end
-    for fi = 1, #flat_groups do
-      local grp = flat_groups[fi]
-      local glen = #grp
-      for pi = 1, glen do
-        local pa = grp[pi]
-        local a = mfloor(pa / K)
-        local b = pa - a * K
-        -- Hoist pxs[a] / pys[a] out of the pj loop — they don't change per pi.
-        local pa_x = pxs[a]
-        local pa_y = pys[a]
-        for pj = pi + 1, glen do
-          pair_checks = pair_checks + 1
-          local pb = grp[pj]
-          local c = mfloor(pb / K)
-          local d = pb - c * K
-          if a ~= c and a ~= d and b ~= c and b ~= d then
-            local v_a_x = pxs[c] - pa_x
-            local v_a_y = pys[c] - pa_y
-            local v_b_x = pxs[d] - pa_x
-            local v_b_y = pys[d] - pa_y
-            local la2 = v_a_x * v_a_x + v_a_y * v_a_y
-            local lb2 = v_b_x * v_b_x + v_b_y * v_b_y
-            if la2 >= 1e-18 and lb2 >= 1e-18 then
-              local dotv = v_a_x * v_b_x + v_a_y * v_b_y
-              if 4 * dotv * dotv <= la2 * lb2 then
-                angle_pass = angle_pass + 1
-                if not skip_chain_block then
-                  -- Lazy alloc: keep CCW corner ids in locals while the
-                  -- four make_chain calls run; only allocate corners_ccw
-                  -- and chains tables when all four sides validate, so
-                  -- the ~83% of angle-pass candidates that fail the
-                  -- chain check don't pay for two table allocations.
-                  local cc1, cc2, cc3, cc4
-                  if cross_2d(v_a_x, v_a_y, v_b_x, v_b_y) > 0 then
-                    cc1, cc2, cc3, cc4 = a, c, b, d
-                  else
-                    cc1, cc2, cc3, cc4 = a, d, b, c
-                  end
+        local glen = #grp
+        if glen >= 2 then
+          for pi = 1, glen do
+            local pa = grp[pi]
+            local a = mfloor(pa / K)
+            local b = pa - a * K
+            for pj = pi + 1, glen do
+              pair_checks = pair_checks + 1
+              local pb = grp[pj]
+              local c = mfloor(pb / K)
+              local d = pb - c * K
+              if a ~= c and a ~= d and b ~= c and b ~= d then
+                local i, j, k = a, c, d  -- l = b
+                local pix = pxs[i]; local piy = pys[i]
+                local v_a_x = pxs[j] - pix
+                local v_a_y = pys[j] - piy
+                local v_b_x = pxs[k] - pix
+                local v_b_y = pys[k] - piy
+                local la2 = v_a_x * v_a_x + v_a_y * v_a_y
+                local lb2 = v_b_x * v_b_x + v_b_y * v_b_y
+                if la2 >= 1e-18 and lb2 >= 1e-18 then
+                  local dotv = v_a_x * v_b_x + v_a_y * v_b_y
+                  if 4 * dotv * dotv <= la2 * lb2 then
+                    angle_pass = angle_pass + 1
+                    if not skip_chain_block then
+                    -- Lazy alloc: keep CCW corner ids in locals while the
+                    -- four make_chain calls run; only allocate corners_ccw
+                    -- and chains tables when all four sides validate, so
+                    -- the ~83% of angle-pass candidates that fail the
+                    -- chain check don't pay for two table allocations.
+                    local cc1, cc2, cc3, cc4
+                    if cross_2d(v_a_x, v_a_y, v_b_x, v_b_y) > 0 then
+                      cc1, cc2, cc3, cc4 = i, j, b, k
+                    else
+                      cc1, cc2, cc3, cc4 = i, k, b, j
+                    end
                     chain_calls = chain_calls + 1
                     local ch1 = make_chain(cc1, cc2)
                     if ch1 ~= nil then
@@ -597,7 +588,9 @@ function M.compute(points, reaches, opts)
                         end
                       end
                     end
-                end  -- if not skip_chain_block
+                    end  -- if not skip_chain_block
+                  end
+                end
               end
             end
           end
