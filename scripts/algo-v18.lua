@@ -141,17 +141,117 @@ function M.compute(points, reaches)
     if not cell then cell = {}; row[cy] = cell end
     cell[#cell + 1] = i
   end
+
+  -- Per-pole int coordinates (4-decimal fixed-point) for exact line keying.
+  local pixs, piys = {}, {}
+  for i = 1, n do
+    local rx, ry = vec_round_xy(points[i].x, points[i].y)
+    pixs[i] = rx
+    piys[i] = ry
+  end
+
+  -- Pre-build line buckets so points_on_segment_strict can do O(1) lookup
+  -- instead of cell-scanning the segment bbox. A "line" is keyed by its
+  -- canonical direction (ndx, ndy) (gcd-reduced, sign-canonicalized) and
+  -- offset c = ndy·pix − ndx·piy. Only reach-near pairs feed lines; any
+  -- pole that participates in a valid chain is reach-near to at least one
+  -- collinear neighbor, so it transitively shows up here. If lo or hi is
+  -- absent from the shared line bucket, no reach-respecting chain spans
+  -- them and make_chain will reject downstream.
+  local lines = {}
+  for i = 1, n do
+    local pix_i = pixs[i]
+    local piy_i = piys[i]
+    local px_i = points[i].x
+    local py_i = points[i].y
+    local ri = reaches[i]
+    local cx_min = mfloor((px_i - ri) / cell_size)
+    local cx_max = mfloor((px_i + ri) / cell_size)
+    local cy_min = mfloor((py_i - ri) / cell_size)
+    local cy_max = mfloor((py_i + ri) / cell_size)
+    for cx = cx_min, cx_max do
+      local row = point_bucket[cx]
+      if row then
+        for cy = cy_min, cy_max do
+          local cell = row[cy]
+          if cell then
+            for ki = 1, #cell do
+              local j = cell[ki]
+              if j > i then
+                local dxf = points[j].x - px_i
+                local dyf = points[j].y - py_i
+                local d2 = dxf * dxf + dyf * dyf
+                local rj = reaches[j]
+                local r = ri < rj and ri or rj
+                if d2 <= r * r then
+                  local idx = pixs[j] - pix_i
+                  local idy = piys[j] - piy_i
+                  local a = idx >= 0 and idx or -idx
+                  local b = idy >= 0 and idy or -idy
+                  local g
+                  if a == 0 then g = b
+                  elseif b == 0 then g = a
+                  else
+                    while b ~= 0 do a, b = b, a % b end
+                    g = a
+                  end
+                  local ndx = idx / g
+                  local ndy = idy / g
+                  if ndx < 0 or (ndx == 0 and ndy < 0) then
+                    ndx = -ndx; ndy = -ndy
+                  end
+                  local c = ndy * pix_i - ndx * piy_i
+                  local row_a = lines[ndx]
+                  if not row_a then row_a = {}; lines[ndx] = row_a end
+                  local row_b = row_a[ndy]
+                  if not row_b then row_b = {}; row_a[ndy] = row_b end
+                  local line = row_b[c]
+                  if not line then
+                    line = { poles = {}, ndx = ndx, ndy = ndy,
+                             anchor_x = pix_i, anchor_y = piy_i }
+                    row_b[c] = line
+                  end
+                  line.poles[i] = true
+                  line.poles[j] = true
+                end
+              end
+            end
+          end
+        end
+      end
+    end
+  end
+
+  -- Sort each line's poles by canonical direction; build pos_in_line for
+  -- O(1) "where on this line is pole P?" lookup.
+  for _, row_a in pairs(lines) do
+    for _, row_b in pairs(row_a) do
+      for _, line in pairs(row_b) do
+        local sorted = {}
+        for p in pairs(line.poles) do sorted[#sorted + 1] = p end
+        local ndx = line.ndx
+        local ndy = line.ndy
+        local ax = line.anchor_x
+        local ay = line.anchor_y
+        table.sort(sorted, function(aa, bb)
+          return (pixs[aa] - ax) * ndx + (piys[aa] - ay) * ndy
+               < (pixs[bb] - ax) * ndx + (piys[bb] - ay) * ndy
+        end)
+        line.poles = sorted
+        local pos_in_line = {}
+        for ki = 1, #sorted do
+          pos_in_line[sorted[ki]] = ki
+        end
+        line.pos_in_line = pos_in_line
+      end
+    end
+  end
   stats.t_setup.stop()
 
-  -- Reusable buffers for points_on_segment_strict so each call doesn't
-  -- allocate a fresh result table + seen set. Cleared at the top of every
-  -- call; the caller reads pos_seg_ks[1..count] (sorted by t).
+  -- Reusable buffer for points_on_segment_strict's intermediate output.
+  -- Cleared at the top of every call; caller reads pos_seg_ks[1..count].
   local pos_seg_count = 0
-  local pos_seg_ts = {}
   local pos_seg_ks = {}
-  local pos_seg_seen = {}
-  local pos_seg_seen_count = 0
-  local pos_seg_seen_keys = {}
 
   -- Diagnostic counters (cheap, kept on). Reading them doesn't change
   -- algorithm output.
@@ -170,88 +270,59 @@ function M.compute(points, reaches)
     return ri < rj and ri or rj
   end
 
-  -- Fills pos_seg_ts[] / pos_seg_ks[] with collinear interior points of
-  -- segment i—j, sorted by t in [0, 1]. Returns the count.
+  -- Fills pos_seg_ks[1..count] with collinear interior poles of segment i—j,
+  -- in order from i toward j. Output identical to a cell-scan that catches
+  -- any pole within EPS_GEOM of the line (Factorio's grid-aligned positions
+  -- make the integer-key match strict and floating-point match coincide).
+  --
+  -- The pre-built line bucket gives O(1) lookup of all collinear poles in
+  -- the (lo, hi) direction, then we slice the sorted poles between lo's and
+  -- hi's positions on the line. If the line bucket entry is missing or
+  -- either endpoint isn't in it, no chain can span lo→hi via reach-near
+  -- hops, so we return 0 and let make_chain reject via the consecutive-gap
+  -- check.
   local function points_on_segment_strict(i, j)
     pos_seg_count = 0
-    for si = 1, pos_seg_seen_count do
-      pos_seg_seen[pos_seg_seen_keys[si]] = nil
+    local idx = pixs[j] - pixs[i]
+    local idy = piys[j] - piys[i]
+    if idx == 0 and idy == 0 then return 0 end
+    local a = idx >= 0 and idx or -idx
+    local b = idy >= 0 and idy or -idy
+    local g
+    if a == 0 then g = b
+    elseif b == 0 then g = a
+    else
+      while b ~= 0 do a, b = b, a % b end
+      g = a
     end
-    pos_seg_seen_count = 0
-
-    local pax, pay = pxs[i], pys[i]
-    local pbx, pby = pxs[j], pys[j]
-    local dx = pbx - pax
-    local dy = pby - pay
-    local L2 = dx * dx + dy * dy
-    if L2 < 1e-12 then return 0 end
-    local minx, maxx = pax, pbx
-    if minx > maxx then minx, maxx = maxx, minx end
-    local miny, maxy = pay, pby
-    if miny > maxy then miny, maxy = maxy, miny end
-    local cx1 = mfloor(minx / cell_size)
-    local cx2 = mfloor(maxx / cell_size)
-    local cy1 = mfloor(miny / cell_size)
-    local cy2 = mfloor(maxy / cell_size)
-
-    -- Cell-level pre-filter: a cell whose center is far enough from the
-    -- line cannot contain any pole within EPS_GEOM of it. With cell radius
-    -- r = cell_size · √2/2 (corner-to-center) and Cauchy-Schwarz on cv,
-    -- |cv(P) - cv(C)| ≤ r · L for any P in the cell, so skip the cell when
-    -- cv(C)² > (r·L + EPS_GEOM)². The EPS_GEOM cross term is negligible
-    -- at our scales, so we approximate by L² · r² with a 1% safety margin.
-    local cell_skip_threshold = L2 * cell_size * cell_size * 0.5 * 1.01
-
-    for cx = cx1, cx2 do
-      local row = point_bucket[cx]
-      if row then
-        local cx_center = (cx + 0.5) * cell_size
-        for cy = cy1, cy2 do
-          local cell = row[cy]
-          if cell then
-            local cy_center = (cy + 0.5) * cell_size
-            local cell_cv = (cx_center - pax) * dy - (cy_center - pay) * dx
-            if cell_cv * cell_cv <= cell_skip_threshold then
-              for ki = 1, #cell do
-                local k = cell[ki]
-                if k ~= i and k ~= j and not pos_seg_seen[k] then
-                  pos_seg_seen[k] = true
-                  pos_seg_seen_count = pos_seg_seen_count + 1
-                  pos_seg_seen_keys[pos_seg_seen_count] = k
-                  local pkx = pxs[k]
-                  local pky = pys[k]
-                  local cv = (pkx - pax) * dy - (pky - pay) * dx
-                  if mabs(cv) <= EPS_GEOM then
-                    local t = ((pkx - pax) * dx + (pky - pay) * dy) / L2
-                    if t > 1e-6 and t < 1 - 1e-6 then
-                      pos_seg_count = pos_seg_count + 1
-                      pos_seg_ts[pos_seg_count] = t
-                      pos_seg_ks[pos_seg_count] = k
-                    end
-                  end
-                end
-              end
-            end
-          end
-        end
+    local ndx = idx / g
+    local ndy = idy / g
+    if ndx < 0 or (ndx == 0 and ndy < 0) then
+      ndx = -ndx; ndy = -ndy
+    end
+    local c = ndy * pixs[i] - ndx * piys[i]
+    local row_a = lines[ndx]
+    if not row_a then return 0 end
+    local row_b = row_a[ndy]
+    if not row_b then return 0 end
+    local line = row_b[c]
+    if not line then return 0 end
+    local pos_in_line = line.pos_in_line
+    local p_i = pos_in_line[i]
+    local p_j = pos_in_line[j]
+    if not p_i or not p_j then return 0 end
+    local poles = line.poles
+    if p_i < p_j then
+      for k = p_i + 1, p_j - 1 do
+        pos_seg_count = pos_seg_count + 1
+        pos_seg_ks[pos_seg_count] = poles[k]
+      end
+    else
+      for k = p_i - 1, p_j + 1, -1 do
+        pos_seg_count = pos_seg_count + 1
+        pos_seg_ks[pos_seg_count] = poles[k]
       end
     end
-
-    -- Insertion sort by t — typical count is 0–3, so simpler than table.sort
-    -- and skips the comparator-closure call.
-    for si = 2, pos_seg_count do
-      local key_t = pos_seg_ts[si]
-      local key_k = pos_seg_ks[si]
-      local sj = si - 1
-      while sj >= 1 and pos_seg_ts[sj] > key_t do
-        pos_seg_ts[sj + 1] = pos_seg_ts[sj]
-        pos_seg_ks[sj + 1] = pos_seg_ks[sj]
-        sj = sj - 1
-      end
-      pos_seg_ts[sj + 1] = key_t
-      pos_seg_ks[sj + 1] = key_k
-    end
-
     return pos_seg_count
   end
 
