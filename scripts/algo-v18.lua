@@ -264,9 +264,6 @@ function M.compute(points, reaches, opts)
   -- algorithm output.
   local cache_hits = 0
   local cache_misses = 0
-  local chain_short = 0   -- side² ≤ pair_reach²
-  local chain_medium = 0  -- pair_reach² < side² ≤ 4·pair_reach²
-  local chain_long = 0    -- side² > 4·pair_reach²
 
   -- Per-pole reach squared, so make_chain can compare squared lengths and
   -- skip the per-segment math.sqrt.
@@ -339,15 +336,6 @@ function M.compute(points, reaches, opts)
   local chain_cache = {}
 
   local function _make_chain_inner(lo, hi)
-    -- Side bucket counter (diagnostic-only).
-    local sx = pxs[hi] - pxs[lo]
-    local sy = pys[hi] - pys[lo]
-    local side_sq = sx * sx + sy * sy
-    local pr_sq = pair_reach_sq(lo, hi)
-    if side_sq <= pr_sq then chain_short = chain_short + 1
-    elseif side_sq <= 4 * pr_sq then chain_medium = chain_medium + 1
-    else chain_long = chain_long + 1 end
-
     local row = chain_cache[lo]
     if row then
       local cached = row[hi]
@@ -893,9 +881,6 @@ function M.compute(points, reaches, opts)
 
   stats.cache_hits = cache_hits
   stats.cache_misses = cache_misses
-  stats.chain_short = chain_short
-  stats.chain_medium = chain_medium
-  stats.chain_long = chain_long
 
   -- =========================================================
   -- Phase B: collect edges + Kruskal MST closure (with intersection check)
