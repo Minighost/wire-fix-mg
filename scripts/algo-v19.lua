@@ -1,6 +1,15 @@
 -- Pattern-aware wire layout: parallelogram detection + isosceles symmetry + MST.
 -- Port of Python prototype algo_v18.py.
 --
+-- v19 vs v18:
+--   - Parallelogram angle filter changed. v18 admitted any candidate with
+--     side-angle in [60°, 120°] (`4·dot² ≤ |a|²·|b|²`). v19 admits only
+--     candidates whose short diagonal is at least as long as both sides
+--     (`min(|a|², |b|²)² ≥ 4·dot²`). For rhombi (a=b) both rules coincide;
+--     for unequal sides v19 is strict and rejects elongated parallelograms.
+--     Motivation: visually & geometrically more deterministic — the kept
+--     candidates can always be split into two near-isosceles triangles.
+--
 -- Differences from algo_v18.py:
 --   - Dead code (split_parl, split_parl_to_data, point_in_quad_strict,
 --     point_in_or_on_quad, points_in_or_on_quad) was not ported — those
@@ -445,7 +454,12 @@ function M.compute(points, reaches, opts)
 
   -- Enumerate parallelogram candidates over the full pole set.
   -- Two pairs sharing a midpoint = diagonals of a parallelogram.
-  -- Filter by side-angle in [60°, 120°] (4·dot² ≤ |a|²|b|²).
+  -- Filter: short diagonal length ≥ both side lengths
+  --   d_short² = |a|² + |b|² - 2|a·b| ≥ max(|a|², |b|²)
+  --   ⟺ min(|a|², |b|²) ≥ 2|a·b|  (both sides positive)
+  --   ⟺ min(|a|², |b|²)² ≥ 4·(a·b)²
+  -- For rhombi (|a|=|b|) this matches v18's [60°, 120°] check; otherwise it
+  -- is strict and excludes elongated parallelograms.
   local function enumerate_parls()
     if n < 4 then return {} end
 
@@ -521,7 +535,8 @@ function M.compute(points, reaches, opts)
                 local lb2 = v_b_x * v_b_x + v_b_y * v_b_y
                 if la2 >= 1e-18 and lb2 >= 1e-18 then
                   local dotv = v_a_x * v_b_x + v_a_y * v_b_y
-                  if 4 * dotv * dotv <= la2 * lb2 then
+                  local m2 = la2 < lb2 and la2 or lb2
+                  if 4 * dotv * dotv <= m2 * m2 then
                     angle_pass = angle_pass + 1
                     if not skip_chain_block then
                     -- Lazy alloc: keep CCW corner ids in locals while the
