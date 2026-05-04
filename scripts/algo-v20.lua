@@ -48,10 +48,12 @@ local EPS_GEOM = 1e-6
 local EPS_DIAG = 1e-6  -- tolerance for short_diag² == max(la², lb²) test
 local ROUND_SCALE = 10000  -- 4-decimal precision
 
--- Hierarchical scale schedule for v20. At each step the iterate hot loop
--- only sees pole pairs whose axis-aligned bbox is ≤ this scale, so small
--- parls get found and prune the pair set before larger scales fire.
-local SCALES = { 32, 64, 128, 256 }
+-- v20 builds its scale schedule dynamically inside M.compute: doubling
+-- from 32 until the last scale is ≥ the layout's longer bbox dimension,
+-- so every pole pair is enumerated by exactly one scale (no cap, no
+-- missed-because-too-big parls). The per-scale time and candidate count
+-- are recorded in stats.scale_times / stats.scale_candidates so we can
+-- see where time goes as the schedule grows.
 local mfloor = math.floor
 local mabs = math.abs
 local msqrt = math.sqrt
@@ -1023,15 +1025,51 @@ function M.compute(points, reaches, opts)
     end
   end
 
+  -- Dynamic scale schedule: double from 32 until the last scale covers
+  -- the layout's longer bbox dimension, so every pole pair is enumerable
+  -- at exactly one scale. No artificial cap — parls of any size present
+  -- in the layout get a chance.
+  local SCALES = {}
+  do
+    local lx_min, lx_max = pxs[1], pxs[1]
+    local ly_min, ly_max = pys[1], pys[1]
+    for i = 2, n do
+      local x = pxs[i]
+      local y = pys[i]
+      if x < lx_min then lx_min = x end
+      if x > lx_max then lx_max = x end
+      if y < ly_min then ly_min = y end
+      if y > ly_max then ly_max = y end
+    end
+    local layout_max_dim = lx_max - lx_min
+    if (ly_max - ly_min) > layout_max_dim then layout_max_dim = ly_max - ly_min end
+    local s = 32
+    while s < layout_max_dim do
+      SCALES[#SCALES + 1] = s
+      s = s * 2
+    end
+    SCALES[#SCALES + 1] = s
+    stats.layout_max_dim = layout_max_dim
+  end
+  stats.scale_schedule = SCALES
+
   stats.t_scale_total = game.create_profiler()
   stats.scale_candidates = {}      -- per-scale candidate counts
   stats.scale_dead_after = {}      -- per-scale cumulative dead pole count
+  stats.scale_times = {}           -- per-scale elapsed-time profilers
+  stats.scale_primary_after = {}   -- per-scale cumulative primary count
+  stats.scale_expansion_after = {} -- per-scale cumulative expansion count
   for s_idx = 1, #SCALES do
     local scale = SCALES[s_idx]
+    local p_scale = game.create_profiler()
     local candidates = enumerate_parls(scale)
     stats.scale_candidates[s_idx] = #candidates
     detect_phased_for_scale(candidates)
+    p_scale.stop()
+    stats.scale_times[s_idx] = p_scale
     stats.scale_dead_after[s_idx] = dead_count
+    stats.scale_primary_after[s_idx] = #primary_parls
+    stats.scale_expansion_after[s_idx] = #expansion_parls
   end
   stats.t_scale_total.stop()
 

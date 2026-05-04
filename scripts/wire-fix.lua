@@ -149,13 +149,21 @@ function M.run(player_index, entities)
       "  setup=", v20_stats.t_setup,
       "  scale_total=", v20_stats.t_scale_total,
       "  iso=", v20_stats.t_iso})
-    if v20_stats.scale_candidates then
+    if v20_stats.scale_schedule then
+      player.print(string.format(
+        "    layout_max_dim=%d  scales=%d", v20_stats.layout_max_dim or 0,
+        #v20_stats.scale_schedule))
+      local sched = v20_stats.scale_schedule
       local sc = v20_stats.scale_candidates
       local sd = v20_stats.scale_dead_after
-      player.print(string.format(
-        "    per-scale candidates: 32=%d 64=%d 128=%d 256=%d  dead_after: 32=%d 64=%d 128=%d 256=%d",
-        sc[1] or 0, sc[2] or 0, sc[3] or 0, sc[4] or 0,
-        sd[1] or 0, sd[2] or 0, sd[3] or 0, sd[4] or 0))
+      local sp = v20_stats.scale_primary_after
+      local se = v20_stats.scale_expansion_after
+      local st = v20_stats.scale_times
+      for i = 1, #sched do
+        player.print({"", string.format(
+          "      scale=%d  cand=%d  primary=%d  expansion=%d  dead=%d  time=",
+          sched[i], sc[i] or 0, sp[i] or 0, se[i] or 0, sd[i] or 0), st[i]})
+      end
     end
     player.print(string.format(
       "    pair_checks=%d  angle_pass=%d  iso_pass=%d  iso_refl=%d  chain_calls=%d  chain_success=%d  dead=%d",
