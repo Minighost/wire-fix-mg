@@ -1056,13 +1056,23 @@ function M.compute(points, reaches, opts)
   stats.t_scale_total = game.create_profiler()
   stats.scale_candidates = {}      -- per-scale candidate counts
   stats.scale_dead_after = {}      -- per-scale cumulative dead pole count
-  stats.scale_times = {}           -- per-scale elapsed-time profilers
+  stats.scale_times = {}           -- per-scale elapsed-time profilers (full iter)
+  stats.scale_insert_times = {}    -- per-scale enumerate insert profilers
+  stats.scale_iterate_times = {}   -- per-scale enumerate iterate profilers
   stats.scale_primary_after = {}   -- per-scale cumulative primary count
   stats.scale_expansion_after = {} -- per-scale cumulative expansion count
+  stats.scale_pair_checks = {}     -- per-scale pair_checks delta
+  stats.scale_angle_pass = {}      -- per-scale angle_pass delta
+  stats.scale_chain_calls = {}     -- per-scale chain_calls delta
   for s_idx = 1, #SCALES do
     local scale = SCALES[s_idx]
+    local pc_before = pair_checks
+    local ap_before = angle_pass
+    local cc_before = chain_calls
     local p_scale = game.create_profiler()
     local candidates = enumerate_parls(scale)
+    stats.scale_insert_times[s_idx] = stats.t_enum_insert
+    stats.scale_iterate_times[s_idx] = stats.t_enum_iterate
     stats.scale_candidates[s_idx] = #candidates
     detect_phased_for_scale(candidates)
     p_scale.stop()
@@ -1070,6 +1080,9 @@ function M.compute(points, reaches, opts)
     stats.scale_dead_after[s_idx] = dead_count
     stats.scale_primary_after[s_idx] = #primary_parls
     stats.scale_expansion_after[s_idx] = #expansion_parls
+    stats.scale_pair_checks[s_idx] = pair_checks - pc_before
+    stats.scale_angle_pass[s_idx] = angle_pass - ap_before
+    stats.scale_chain_calls[s_idx] = chain_calls - cc_before
   end
   stats.t_scale_total.stop()
 

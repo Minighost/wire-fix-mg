@@ -159,10 +159,19 @@ function M.run(player_index, entities)
       local sp = v20_stats.scale_primary_after
       local se = v20_stats.scale_expansion_after
       local st = v20_stats.scale_times
+      local sit = v20_stats.scale_insert_times
+      local stt = v20_stats.scale_iterate_times
+      local spc = v20_stats.scale_pair_checks
+      local sap = v20_stats.scale_angle_pass
+      local scc = v20_stats.scale_chain_calls
       for i = 1, #sched do
         player.print({"", string.format(
           "      scale=%d  cand=%d  primary=%d  expansion=%d  dead=%d  time=",
           sched[i], sc[i] or 0, sp[i] or 0, se[i] or 0, sd[i] or 0), st[i]})
+        player.print({"", string.format(
+          "        pair_checks=%d  angle_pass=%d  chain_calls=%d  insert=",
+          spc[i] or 0, sap[i] or 0, scc[i] or 0), sit[i],
+          "  iterate=", stt[i]})
       end
     end
     player.print(string.format(
