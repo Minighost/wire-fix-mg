@@ -284,6 +284,14 @@ function M.compute(points, reaches, opts)
   end
   stats.t_setup.stop()
 
+  -- v20 chain pruning state. Declared up here (before make_chain) so the
+  -- chain build path and the cache hit path can reject chains whose
+  -- intermediates are now interior to a previously accepted parl. The
+  -- helpers that populate pole_dead (point_in_parl_strict, mark_dead_in_parl)
+  -- live further down where pole_bucket and the SAT helpers are in scope.
+  local pole_dead = {}
+  local dead_count = 0
+
   -- Reusable buffer for points_on_segment_strict's intermediate output.
   -- Cleared at the top of every call; caller reads pos_seg_ks[1..count].
   local pos_seg_count = 0
@@ -371,6 +379,17 @@ function M.compute(points, reaches, opts)
       if cached ~= nil then
         cache_hits = cache_hits + 1
         if cached == false then return nil end
+        -- v20.x chain pruning: a previously-valid cached chain may have
+        -- gained a dead intermediate since it was cached (a parl accepted
+        -- in a later scale absorbed the intermediate into its interior).
+        -- Re-walk the intermediates and reject if any died. We don't
+        -- update the cache entry — leaving it as-is keeps the chain
+        -- available again if later scales decide to drop the dead-pole
+        -- requirement (they don't, but invalidating would force a full
+        -- segment-scan rebuild on every future call).
+        for ci = 2, #cached - 1 do
+          if pole_dead[cached[ci]] then return nil end
+        end
         return cached
       end
     else
@@ -390,6 +409,20 @@ function M.compute(points, reaches, opts)
       local segdx = pxs[b] - pxs[a]
       local segdy = pys[b] - pys[a]
       if segdx * segdx + segdy * segdy > pair_reach_sq(a, b) then
+        row[hi] = false
+        return nil
+      end
+    end
+
+    -- v20.x chain pruning: if any intermediate is interior to an already
+    -- accepted parl, the chain "passes through" that parl. A side using
+    -- this chain would force the candidate Q to overlap (or fully sit
+    -- inside) the accepted parl, which SAT would reject downstream;
+    -- rejecting at chain build time skips the candidate construction +
+    -- SAT cost. Cache the rejection so subsequent calls hit the false
+    -- branch above immediately.
+    for ci = 2, #chain - 1 do
+      if pole_dead[chain[ci]] then
         row[hi] = false
         return nil
       end
@@ -578,14 +611,12 @@ function M.compute(points, reaches, opts)
     end
   end
 
-  -- v20 chain pruning state. pole_dead[i] = true once pole i is strictly
-  -- inside an accepted parl's convex hull. Dead poles are filtered out of
-  -- subsequent scales' mid_groups insert, so the next pass skips a pair
-  -- the moment one of its endpoints belongs to a parl already accepted.
-  -- Boundary poles (corners and chain intermediates on parl sides) stay
-  -- alive — they may legitimately be corners of adjacent parls.
-  local pole_dead = {}
-  local dead_count = 0
+  -- v20 chain pruning state geometry helpers. The pole_dead / dead_count
+  -- locals themselves are declared earlier (right after t_setup.stop) so
+  -- make_chain can see them as upvalues. Dead poles are also filtered out
+  -- of subsequent scales' mid_groups insert. Boundary poles (corners and
+  -- chain intermediates on parl sides) stay alive — they may legitimately
+  -- be corners of adjacent parls.
 
   -- Strict point-in-parl test using CCW corner order. Returns true only
   -- when the pole sits strictly inside (positive signed area against every
