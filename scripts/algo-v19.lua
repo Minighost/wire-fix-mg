@@ -2,28 +2,25 @@
 --
 -- v19 vs v18:
 --   1. Parallelogram confirmation rule replaces v18's 60°–120° angle filter
---      with a *short diagonal* test:
---        confirmed parl  ⇔  short_diag > la AND short_diag > lb  (strict)
---        iso emission    ⇔  short_diag = max(la, lb)             (within eps)
---        otherwise       ⇒  reject
+--      with a side-length test:
+--        confirmed parl  ⇔  short_diag ≥ max(la, lb)              (== or >)
 --      In squared form (let A=la², B=lb², dot=v_a·v_b):
 --        short_diag² = A + B − 2·|dot|
---        confirmed   ⇔  2·|dot| <  min(A, B)
---        iso         ⇔  2·|dot| =  min(A, B)
---      For squares (A=B) confirmed coincides with v18 (60°<θ<120°). For
+--        confirmed   ⇔  2·|dot| ≤ min(A, B)
+--      For squares (A=B) confirmed coincides with v18 (60°≤θ≤120°). For
 --      elongated parallelograms the rule is strictly stricter.
---   2. iso emission replaces v18's try_isosceles_split. When the equality
---      condition holds, the four corners are NOT a confirmed parallelogram
---      and are not wired as such — no chain edges, no split. The shape is
---      used purely as a geometric anchor: for each of the two long parl
+--   2. iso emission replaces v18's try_isosceles_split. It runs per accepted
+--      parl (primary + expansion, after phase greedy + SAT non-overlap), and
+--      only when the parl satisfies short_diag == max(la, lb) — i.e., the
+--      boundary of the side-length rule. For each of the two long parl
 --      sides, reflect the opposite parl corner across the long side's
 --      midpoint (point-symmetric / 180° rotation). If the reflection target
 --      X coincides with an existing pole and the resulting triangle's three
---      sides are all within direct reach, emit it as an iso triangle. v18
+--      sides all fit a single direct hop, emit it as an iso triangle. v18
 --      reflected across both equal-length sides per split triangle (up to
 --      4 reflections); v19 reflects exactly once per long side (up to 2
---      reflections per shape), and only when the short diagonal matches
---      the long side specifically.
+--      per parl). Tying iso emission to accepted parls means iso patterns
+--      inherit the parls' SAT non-overlap.
 --
 -- Public API:
 --   M.compute(points, reaches, opts) -> edges, parls, iso_tris, stats
@@ -459,13 +456,15 @@ function M.compute(points, reaches, opts)
     return true
   end
 
-  -- v19 iso emission state. The == case (short_diag² == max(la², lb²)) is
-  -- NOT a confirmed parallelogram, so we don't wire any of its sides or
-  -- diagonal — the four corners are used only as a geometric anchor for
-  -- finding reflection triangles. For each of the two long parl sides,
-  -- the opposite parl corner is reflected across the side's midpoint;
-  -- the resulting triangle is emitted only if the reflected point exists
-  -- as a pole and all three triangle sides are within direct reach.
+  -- v19 iso emission state. Iso reflections fire per accepted parl whose
+  -- short diagonal equals its longer side (the boundary of the side-length
+  -- rule). For each of the two long parl sides, the opposite parl corner is
+  -- reflected across the side's midpoint; the resulting triangle is emitted
+  -- only if the reflected point exists as a pole and all three triangle
+  -- sides fit a single direct hop. The (side_a, side_b) edge is also added
+  -- by the parl chain, but if the parl side runs through intermediate
+  -- poles its direct distance exceeds the per-pole reach and the reflection
+  -- is rejected — matching v18's iso reflection convention.
   local accepted_iso_refl_tris = {}   -- {long_a, long_b, X} per reflection
   local seen_iso = {}                 -- tri_key dedup
   local iso_pass = 0
@@ -497,41 +496,41 @@ function M.compute(points, reaches, opts)
     iso_refl_emit = iso_refl_emit + 1
   end
 
-  -- Called from the iterate hot loop when 2·|dot| == min(la², lb²) (within
-  -- EPS_DIAG). The four corners do not form a confirmed parl; they're used
-  -- only to identify the two long sides and the corresponding reflection
-  -- candidates. Each long side gets exactly one reflection attempt.
-  local function emit_iso_for_pair(i_, j_, k_, b_, v_a_x, v_a_y, v_b_x, v_b_y, la2, lb2, dotv)
-    local cc1, cc2, cc3, cc4
-    local cross = v_a_x * v_b_y - v_a_y * v_b_x
-    if cross > 0 then
-      cc1, cc2, cc3, cc4 = i_, j_, b_, k_
-    else
-      cc1, cc2, cc3, cc4 = i_, k_, b_, j_
-    end
-
-    -- Short diag: dot ≥ 0 → cc2-cc4; dot < 0 → cc1-cc3. We don't wire it,
-    -- but we use it to know which split-tri-half each parl corner sits in.
-    local short_a
-    if dotv >= 0 then short_a = cc2 else short_a = cc1 end
-
-    -- Side type lengths in the CCW labeling.
+  -- Called per accepted parl (primary + expansion). When the parl satisfies
+  -- short_diag² == max(L1², L2²) (within EPS_DIAG), reflect each of the two
+  -- long sides outward across its midpoint. Otherwise no-op.
+  local function try_iso_emit(P)
+    local cc1, cc2, cc3, cc4 = P.corners[1], P.corners[2], P.corners[3], P.corners[4]
+    -- CCW side type squared lengths.
     --   L1 = sides cc1-cc2 and cc3-cc4 (parallel pair).
     --   L2 = sides cc2-cc3 and cc4-cc1 (parallel pair).
-    --   cross > 0: cc2 - cc1 = v_a → L1² = la²; L2² = lb².
-    --   cross < 0: cc2 - cc1 = v_b → L1² = lb²; L2² = la².
-    local L1_sq, L2_sq
-    if cross > 0 then L1_sq, L2_sq = la2, lb2
-    else L1_sq, L2_sq = lb2, la2 end
+    local L1_dx = pxs[cc2] - pxs[cc1]
+    local L1_dy = pys[cc2] - pys[cc1]
+    local L2_dx = pxs[cc3] - pxs[cc2]
+    local L2_dy = pys[cc3] - pys[cc2]
+    local L1_sq = L1_dx * L1_dx + L1_dy * L1_dy
+    local L2_sq = L2_dx * L2_dx + L2_dy * L2_dy
+    local max_side_sq = L1_sq > L2_sq and L1_sq or L2_sq
+    -- Short diagonal squared: take the smaller of |cc3-cc1|² and |cc4-cc2|².
+    local d13x = pxs[cc3] - pxs[cc1]
+    local d13y = pys[cc3] - pys[cc1]
+    local d24x = pxs[cc4] - pxs[cc2]
+    local d24y = pys[cc4] - pys[cc2]
+    local d13_sq = d13x * d13x + d13y * d13y
+    local d24_sq = d24x * d24x + d24y * d24y
+    local short_diag_sq, short_a
+    if d13_sq < d24_sq then short_diag_sq, short_a = d13_sq, cc1
+    else short_diag_sq, short_a = d24_sq, cc2 end
+    -- Iso trigger: short_diag = max_side (== boundary of the parl rule).
+    local diff = short_diag_sq - max_side_sq
+    if diff < -EPS_DIAG or diff > EPS_DIAG then return end
+    iso_pass = iso_pass + 1
     local long_is_L1 = L1_sq >= L2_sq
-
     -- Reflect across each long parl side. The "opp" vertex is the parl
     -- corner on the same half (relative to the short diagonal) as the long
     -- side; reflecting it across the long side's midpoint moves it outward.
     if short_a == cc1 then
       -- Short diag = cc1-cc3. Halves: {cc2} on one side, {cc4} on the other.
-      -- Long sides under L1: (cc1, cc2) on the cc2-side, (cc3, cc4) on the cc4-side.
-      -- Long sides under L2: (cc2, cc3) on the cc2-side, (cc4, cc1) on the cc4-side.
       if long_is_L1 then
         try_reflect_iso(cc1, cc2, cc3)
         try_reflect_iso(cc3, cc4, cc1)
@@ -553,13 +552,10 @@ function M.compute(points, reaches, opts)
 
   -- Enumerate parallelogram candidates over the full pole set.
   -- Two pairs sharing a midpoint = diagonals of a parallelogram.
-  -- v19 confirmation rule: short_diag > both sides (strictly) → confirmed
-  -- parl. short_diag == max(la, lb) (within eps) → reflection-only iso
-  -- emission (the four corners are not wired as a parl). Otherwise reject.
-  -- In squared form, with A=la², B=lb², dot=v_a·v_b:
-  --     2·|dot| < min(A, B) → confirmed parl
-  --     2·|dot| = min(A, B) → iso reflections (one per long side)
-  -- (compare to v18: 4·dot² ≤ A·B, i.e. 60°≤θ≤120°.)
+  -- v19 confirmation rule: short_diag ≥ max(la, lb). In squared form, with
+  -- A=la², B=lb², dot=v_a·v_b:  2·|dot| ≤ min(A, B). Iso reflections fire
+  -- per accepted parl in try_iso_emit when 2·|dot| = min(A, B) exactly.
+  -- (Compare to v18: 4·dot² ≤ A·B, i.e. 60°≤θ≤120°.)
   local function enumerate_parls()
     if n < 4 then return {} end
 
@@ -635,15 +631,14 @@ function M.compute(points, reaches, opts)
                 local lb2 = v_b_x * v_b_x + v_b_y * v_b_y
                 if la2 >= 1e-18 and lb2 >= 1e-18 then
                   local dotv = v_a_x * v_b_x + v_a_y * v_b_y
-                  -- v19 confirmation rule: short_diag > both sides (strict).
+                  -- v19 confirmation rule: short_diag ≥ max(la, lb).
                   --   short_diag² = la² + lb² − 2·|dot|.
-                  --   confirmed parl  ⇔  2·|dot| < min(la², lb²)
-                  --   iso (== case)   ⇔  2·|dot| = min(la², lb²)
-                  --   reject otherwise.
+                  --   confirmed parl  ⇔  2·|dot| ≤ min(la², lb²)
+                  -- The == boundary of this rule is later detected per
+                  -- accepted parl in try_iso_emit and produces reflections.
                   local two_abs_dot = dotv >= 0 and 2 * dotv or -2 * dotv
                   local lmin = la2 < lb2 and la2 or lb2
-                  local diag_diff = lmin - two_abs_dot
-                  if diag_diff > EPS_DIAG then
+                  if two_abs_dot <= lmin + EPS_DIAG then
                     angle_pass = angle_pass + 1
                     if not skip_chain_block then
                     -- Lazy alloc: keep CCW corner ids in locals while the
@@ -699,13 +694,6 @@ function M.compute(points, reaches, opts)
                       end
                     end
                     end  -- if not skip_chain_block
-                  elseif diag_diff > -EPS_DIAG then
-                    iso_pass = iso_pass + 1
-                    if not skip_chain_block then
-                      emit_iso_for_pair(i, j, k, b,
-                                        v_a_x, v_a_y, v_b_x, v_b_y,
-                                        la2, lb2, dotv)
-                    end
                   end
                 end
               end
@@ -717,8 +705,6 @@ function M.compute(points, reaches, opts)
     stats.t_enum_iterate.stop()
     stats.pair_checks = pair_checks
     stats.angle_pass = angle_pass
-    stats.iso_pass = iso_pass
-    stats.iso_refl_emit = iso_refl_emit
     stats.chain_calls = chain_calls
     stats.chain_success = chain_success
     return candidates
@@ -906,13 +892,19 @@ function M.compute(points, reaches, opts)
     stats.t_phase_loop.stop()
 
     stats.t_iso = game.create_profiler()
-    -- v19: iso emission already happened in enumerate_parls (triggered when
-    -- short_diag² == max(la², lb²)). No per-parl iso work here.
+    for _, P in ipairs(primary_parls) do
+      try_iso_emit(P)
+    end
+    for _, P in ipairs(expansion_parls) do
+      try_iso_emit(P)
+    end
     stats.t_iso.stop()
   end
 
   detect_phased()
 
+  stats.iso_pass = iso_pass
+  stats.iso_refl_emit = iso_refl_emit
   stats.cache_hits = cache_hits
   stats.cache_misses = cache_misses
 
@@ -1030,9 +1022,11 @@ function M.compute(points, reaches, opts)
   end
 
   -- v19 iso reflection triangles — three direct edges each, cross-checked
-  -- against existing edges. The == case is not a confirmed parl, so the
-  -- four parl corners and the diagonal contribute nothing on their own;
-  -- only successful reflections produce wires.
+  -- against existing edges. The (sa, sb) edge is the parl long side, which
+  -- the parent parl already wired via add_edge_unchecked (single segment
+  -- when the long side fits a direct hop, which is the only case the
+  -- reflection's reach check accepts). edge_set dedup makes the redundant
+  -- add_edge_checked call here a cheap no-op.
   for _, T in ipairs(accepted_iso_refl_tris) do
     local sa, sb, x = T[1], T[2], T[3]
     add_edge_checked(sa, sb)
