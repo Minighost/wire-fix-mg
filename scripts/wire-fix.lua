@@ -151,9 +151,9 @@ function M.run(player_index, entities)
       "    insert=", v19_stats.t_enum_insert,
       "  iterate=", v19_stats.t_enum_iterate})
     player.print(string.format(
-      "    pair_checks=%d  angle_pass=%d  iso_pass=%d  iso_emit=%d  iso_refl=%d  chain_calls=%d  chain_success=%d",
+      "    pair_checks=%d  angle_pass=%d  iso_pass=%d  iso_refl=%d  chain_calls=%d  chain_success=%d",
       v19_stats.pair_checks or 0, v19_stats.angle_pass or 0,
-      v19_stats.iso_pass or 0, v19_stats.iso_emit or 0, v19_stats.iso_refl_emit or 0,
+      v19_stats.iso_pass or 0, v19_stats.iso_refl_emit or 0,
       v19_stats.chain_calls or 0, v19_stats.chain_success or 0))
     player.print(string.format(
       "    cache hits=%d misses=%d",
