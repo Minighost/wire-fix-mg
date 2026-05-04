@@ -603,6 +603,38 @@ function M.compute(points, reaches, opts)
     return true
   end
 
+  -- Boundary-inclusive point-in-parl test: returns true when the pole is
+  -- inside or on any side/corner of P. Used by the SAT containment override
+  -- so a smaller parl whose corner sits exactly on the bigger parl's edge
+  -- still counts as "contained".
+  local function point_in_parl_inclusive(p_idx, P)
+    local px = pxs[p_idx]
+    local py = pys[p_idx]
+    local c = P.corners
+    for i = 1, 4 do
+      local a = c[i]
+      local b = c[(i % 4) + 1]
+      local ax, ay = pxs[a], pys[a]
+      local bx, by = pxs[b], pys[b]
+      local cross = (bx - ax) * (py - ay) - (by - ay) * (px - ax)
+      if cross < -EPS_GEOM then return false end
+    end
+    return true
+  end
+
+  -- v20 containment override: P fully contains Q iff every corner of Q
+  -- lies on or inside P. Used in the SAT non-overlap check so that a
+  -- larger candidate accepted at a later scale absorbs the smaller parls
+  -- (and their lattice expansions) it covers, instead of being rejected
+  -- by overlap with them.
+  local function parl_contains_parl(P, Q)
+    local qc = Q.corners
+    for i = 1, 4 do
+      if not point_in_parl_inclusive(qc[i], P) then return false end
+    end
+    return true
+  end
+
   -- Iterate poles inside P's bbox (via point_bucket) and mark interior
   -- ones as dead. Cheap because each parl's bbox is small relative to
   -- the layout and we only inspect cells the bbox actually touches.
@@ -942,33 +974,48 @@ function M.compute(points, reaches, opts)
 
     for ph = 1, 4 do
       for _, P in ipairs(phases[ph]) do
-        local conflict = false
-        local p_bxmin, p_bxmax = P.bxmin, P.bxmax
-        local p_bymin, p_bymax = P.bymin, P.bymax
-        for _, Q in ipairs(primary_parls) do
-          if p_bxmin <= Q.bxmax and p_bxmax >= Q.bxmin
-             and p_bymin <= Q.bymax and p_bymax >= Q.bymin then
-            if quads_overlap(P.corners, Q.corners) then conflict = true; break end
-          end
-        end
-        if not conflict then
-          for _, Q in ipairs(expansion_parls) do
+        local p_key = quad_key(P.corners)
+        if not all_seen[p_key] then
+          local conflict = false
+          local p_bxmin, p_bxmax = P.bxmin, P.bxmax
+          local p_bymin, p_bymax = P.bymin, P.bymax
+          -- v20 SAT with containment override: a candidate P that overlaps
+          -- an already-accepted Q is still allowed if P fully contains Q
+          -- (every corner of Q lies on/inside P). Lets a larger parl
+          -- absorb smaller parls (and their lattice expansions) accepted
+          -- at earlier scales rather than getting rejected by them. The
+          -- all_seen pre-check skips re-detections of an already-accepted
+          -- shape (cross-scale duplicate detection — possible because a
+          -- larger scale's pair set is a superset of every smaller one's).
+          for _, Q in ipairs(primary_parls) do
             if p_bxmin <= Q.bxmax and p_bxmax >= Q.bxmin
                and p_bymin <= Q.bymax and p_bymax >= Q.bymin then
-              if quads_overlap(P.corners, Q.corners) then conflict = true; break end
+              if quads_overlap(P.corners, Q.corners) and not parl_contains_parl(P, Q) then
+                conflict = true; break
+              end
             end
           end
-        end
-        if not conflict then
-          primary_parls[#primary_parls + 1] = P
-          all_seen[quad_key(P.corners)] = true
-          mark_dead_in_parl(P)
-          for _, E in ipairs(expand_parl(P)) do
-            local k = quad_key(E.corners)
-            if not all_seen[k] then
-              all_seen[k] = true
-              expansion_parls[#expansion_parls + 1] = E
-              mark_dead_in_parl(E)
+          if not conflict then
+            for _, Q in ipairs(expansion_parls) do
+              if p_bxmin <= Q.bxmax and p_bxmax >= Q.bxmin
+                 and p_bymin <= Q.bymax and p_bymax >= Q.bymin then
+                if quads_overlap(P.corners, Q.corners) and not parl_contains_parl(P, Q) then
+                  conflict = true; break
+                end
+              end
+            end
+          end
+          if not conflict then
+            primary_parls[#primary_parls + 1] = P
+            all_seen[p_key] = true
+            mark_dead_in_parl(P)
+            for _, E in ipairs(expand_parl(P)) do
+              local k = quad_key(E.corners)
+              if not all_seen[k] then
+                all_seen[k] = true
+                expansion_parls[#expansion_parls + 1] = E
+                mark_dead_in_parl(E)
+              end
             end
           end
         end
