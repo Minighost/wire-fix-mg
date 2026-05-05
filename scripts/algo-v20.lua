@@ -888,16 +888,6 @@ function M.compute(points, reaches, opts)
         local a = mfloor(pa / K)
         local b = pa - a * K
         if not pole_dead[a] and not pole_dead[b] then
-          -- B1 length-ratio filter prep: parl rule (short_diag² ≥ max_side²)
-          -- forces max(D_pa², D_pb²) ≤ 3·min(D_pa², D_pb²) on the two
-          -- diagonals (proof via la²+lb² = (D_pa²+D_pb²)/2 ≤ 2·max_side²).
-          -- If the diagonal lengths are too imbalanced the parl rule can't
-          -- hold and the heavier sides+dot+parl-rule check would just
-          -- reject; bail before we compute any of that.
-          local dax = pxs[a] - pxs[b]
-          local day = pys[a] - pys[b]
-          local D_pa_sq = dax * dax + day * day
-          local D_pa_sq3 = D_pa_sq * 3
           for pj = 1, pi - 1 do
             pair_checks = pair_checks + 1
             local pb = grp[pj]
@@ -905,10 +895,6 @@ function M.compute(points, reaches, opts)
             local d = pb - c * K
             if not pole_dead[c] and not pole_dead[d]
                and a ~= c and a ~= d and b ~= c and b ~= d then
-              local dbx = pxs[c] - pxs[d]
-              local dby = pys[c] - pys[d]
-              local D_pb_sq = dbx * dbx + dby * dby
-              if D_pa_sq3 >= D_pb_sq and D_pb_sq * 3 >= D_pa_sq then
                 local i, j, k = a, c, d  -- l = b
                 local pix = pxs[i]; local piy = pys[i]
                 local v_a_x = pxs[j] - pix
@@ -984,7 +970,6 @@ function M.compute(points, reaches, opts)
                     end  -- if not skip_chain_block
                   end  -- if angle_pass (parl rule)
                 end  -- if la2/lb2 nonzero
-              end  -- if B1 length-ratio filter (max ≤ 3·min)
               end  -- if distinct + dead-cd guard
             end  -- for pj
           end  -- if not dead a, b
