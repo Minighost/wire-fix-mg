@@ -302,6 +302,8 @@ function M.compute(points, reaches, opts)
   -- empty by definition.
   local layout_cx_min, layout_cx_max
   local layout_cy_min, layout_cy_max
+  local layout_x_min, layout_x_max
+  local layout_y_min, layout_y_max
   do
     local lx_min, lx_max = pxs[1], pxs[1]
     local ly_min, ly_max = pys[1], pys[1]
@@ -313,6 +315,8 @@ function M.compute(points, reaches, opts)
       if y < ly_min then ly_min = y end
       if y > ly_max then ly_max = y end
     end
+    layout_x_min, layout_x_max = lx_min, lx_max
+    layout_y_min, layout_y_max = ly_min, ly_max
     layout_cx_min = mfloor(lx_min / cell_size)
     layout_cx_max = mfloor(lx_max / cell_size)
     layout_cy_min = mfloor(ly_min / cell_size)
@@ -787,11 +791,28 @@ function M.compute(points, reaches, opts)
     -- never sees dead j's.
     for i = 1, n do
       if not pole_dead[i] then
+        local pi_x = pxs[i]
+        local pi_y = pys[i]
+        -- A1 skip: at the largest scales prev_scale > 0 means a pole whose
+        -- farthest layout corner sits within prev_scale on both axes can
+        -- never form a NEW pair (one with bbox > prev_scale). Skip the
+        -- entire cell sweep for this pole. Saves ~25-30% of pole iterations
+        -- at scale 8192 in a 5520-wide layout where the central rectangle
+        -- of poles has all axis distances ≤ 4096.
+        local can_be_new = true
+        if prev_scale > 0 then
+          local mdx = pi_x - layout_x_min
+          if layout_x_max - pi_x > mdx then mdx = layout_x_max - pi_x end
+          local mdy = pi_y - layout_y_min
+          if layout_y_max - pi_y > mdy then mdy = layout_y_max - pi_y end
+          if mdx <= prev_scale and mdy <= prev_scale then
+            can_be_new = false
+          end
+        end
+        if can_be_new then
         local pix = pixs[i]
         local piy = piys[i]
         local i_packed = i * K
-        local pi_x = pxs[i]
-        local pi_y = pys[i]
         local cx_min = mfloor((pi_x - scale) / cell_size)
         local cx_max = mfloor((pi_x + scale) / cell_size)
         local cy_min = mfloor((pi_y - scale) / cell_size)
@@ -851,8 +872,9 @@ function M.compute(points, reaches, opts)
             end
           end
         end
-      end
-    end
+        end  -- if can_be_new
+      end  -- if not pole_dead[i]
+    end  -- for i = 1, n
     stats.t_enum_insert.stop()
 
     stats.t_enum_iterate = game.create_profiler()
