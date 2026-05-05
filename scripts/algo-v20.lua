@@ -754,32 +754,37 @@ function M.compute(points, reaches, opts)
     end
   end
 
-  -- Enumerate parallelogram candidates restricted by scale and pole_dead.
-  -- Two pairs sharing a midpoint = diagonals of a parallelogram.
+  -- Persistent across the scale loop. Each scale appends only NEW pairs
+  -- (bbox in (prev_scale, scale]); group_old_sizes records each touched
+  -- group's size BEFORE this scale's first append, so iterate can identify
+  -- which entries are new and pair-check only NEW × ALL combinations.
+  -- pair-pair (old, old) was already done at an earlier scale and is not
+  -- redone, eliminating the cross-scale duplicate work that v20 had paid
+  -- for in every previous form.
+  local mid_first = {}
+  local mid_groups = {}
+  local group_old_sizes = {}    -- group ref → size before this scale's first append
+  local touched_groups = {}     -- groups that gained ≥1 entry this scale (iterate input)
+
+  -- Enumerate parallelogram candidates whose two pairs span the bbox band
+  -- (prev_scale, scale]. Pairs from earlier scales stay in mid_groups; this
+  -- call only inserts/iterates the newly-eligible pairs and their pair-pair
+  -- combinations against everything already there.
+  --
   -- v19 confirmation rule: short_diag ≥ max(la, lb). In squared form, with
   -- A=la², B=lb², dot=v_a·v_b:  2·|dot| ≤ min(A, B). Iso reflections fire
   -- per accepted parl in try_iso_emit when 2·|dot| = min(A, B) exactly.
   -- (Compare to v18: 4·dot² ≤ A·B, i.e. 60°≤θ≤120°.)
-  --
-  -- v20: pairs with bbox > scale and pairs touching a dead pole are
-  -- skipped at the insert step; the iterate hot loop never sees them.
-  local function enumerate_parls(scale)
+  local function enumerate_parls(scale, prev_scale)
     if n < 4 then return {} end
 
     stats.t_enum_insert = game.create_profiler()
-    -- v20 hot loop: iterate j candidates spatially via point_bucket, with
-    -- bbox(scale) + pole_dead filters applied at insert time so the
-    -- iterate stage only sees alive, in-scale pairs.
-    --   * 2-level int tables avoid string-key allocation.
-    --   * Pairs are packed as a single int (i * K + j); flat array storage.
-    --   * Singleton midpoints stay inline in mid_first; a group table is
-    --     allocated only when a second pair lands on the same midpoint.
-    --   * pixs / piys are int-keyed flat arrays in the canonical 4-decimal
-    --     fixed-point representation. The midpoint key is the integer sum
-    --     (pixs[i] + pixs[j], piys[i] + piys[j]) — exactly twice the
-    --     midpoint in fixed-point.
-    local mid_first = {}
-    local mid_groups = {}
+    -- Insert step. Pairs whose bbox is ≤ prev_scale were already added at
+    -- an earlier scale; we keep them in mid_groups and only append pairs
+    -- with max(|dx|, |dy|) > prev_scale (and ≤ scale). Dead poles are
+    -- absent from point_bucket cells (mark_dead_in_parl yanks them), so
+    -- only the outer-loop pole_dead[i] guard is needed — the inner loop
+    -- never sees dead j's.
     for i = 1, n do
       if not pole_dead[i] then
         local pix = pixs[i]
@@ -803,12 +808,13 @@ function M.compute(points, reaches, opts)
               if cell then
                 for ki = 1, #cell do
                   local j = cell[ki]
-                  if j > i and not pole_dead[j] then
+                  if j > i then
                     local dx = pxs[j] - pi_x
                     local dy = pys[j] - pi_y
                     local adx = dx >= 0 and dx or -dx
                     local ady = dy >= 0 and dy or -dy
-                    if adx <= scale and ady <= scale then
+                    if adx <= scale and ady <= scale
+                       and (adx > prev_scale or ady > prev_scale) then
                       local rx = pix + pixs[j]
                       local ry = piy + piys[j]
                       local packed = i_packed + j
@@ -822,9 +828,19 @@ function M.compute(points, reaches, opts)
                         if not row_g then row_g = {}; mid_groups[rx] = row_g end
                         local g = row_g[ry]
                         if not g then
+                          -- Group newly born from a singleton + this new pair.
+                          -- The singleton (`existing`) was inserted at an
+                          -- earlier scale; it counts as "old" so old_size = 1.
                           g = { existing, packed }
                           row_g[ry] = g
+                          group_old_sizes[g] = 1
+                          touched_groups[#touched_groups + 1] = g
                         else
+                          if not group_old_sizes[g] then
+                            -- First append to g this scale → snapshot size now.
+                            group_old_sizes[g] = #g
+                            touched_groups[#touched_groups + 1] = g
+                          end
                           g[#g + 1] = packed
                         end
                       end
@@ -841,20 +857,22 @@ function M.compute(points, reaches, opts)
 
     stats.t_enum_iterate = game.create_profiler()
     local candidates = {}
-    for _, ry_row in pairs(mid_groups) do
-      for _, grp in pairs(ry_row) do
-        local glen = #grp
-        if glen >= 2 then
-          for pi = 1, glen do
-            local pa = grp[pi]
-            local a = mfloor(pa / K)
-            local b = pa - a * K
-            for pj = pi + 1, glen do
-              pair_checks = pair_checks + 1
-              local pb = grp[pj]
-              local c = mfloor(pb / K)
-              local d = pb - c * K
-              if a ~= c and a ~= d and b ~= c and b ~= d then
+    for ti = 1, #touched_groups do
+      local grp = touched_groups[ti]
+      local old_size = group_old_sizes[grp]
+      local glen = #grp
+      for pi = old_size + 1, glen do
+        local pa = grp[pi]
+        local a = mfloor(pa / K)
+        local b = pa - a * K
+        if not pole_dead[a] and not pole_dead[b] then
+          for pj = 1, pi - 1 do
+            pair_checks = pair_checks + 1
+            local pb = grp[pj]
+            local c = mfloor(pb / K)
+            local d = pb - c * K
+            if not pole_dead[c] and not pole_dead[d]
+               and a ~= c and a ~= d and b ~= c and b ~= d then
                 local i, j, k = a, c, d  -- l = b
                 local pix = pxs[i]; local piy = pys[i]
                 local v_a_x = pxs[j] - pix
@@ -928,14 +946,13 @@ function M.compute(points, reaches, opts)
                       end
                     end
                     end  -- if not skip_chain_block
-                  end
-                end
-              end
-            end
-          end
-        end
-      end
-    end
+                  end  -- if angle_pass (parl rule)
+                end  -- if la2/lb2 nonzero
+              end  -- if distinct + dead-cd guard
+            end  -- for pj
+          end  -- if not dead a, b
+        end  -- for pi
+      end  -- for ti = 1, #touched_groups
     stats.t_enum_iterate.stop()
     return candidates
   end
@@ -1146,13 +1163,19 @@ function M.compute(points, reaches, opts)
   stats.scale_pair_checks = {}     -- per-scale pair_checks delta
   stats.scale_angle_pass = {}      -- per-scale angle_pass delta
   stats.scale_chain_calls = {}     -- per-scale chain_calls delta
+  local prev_scale = 0
   for s_idx = 1, #SCALES do
     local scale = SCALES[s_idx]
     local pc_before = pair_checks
     local ap_before = angle_pass
     local cc_before = chain_calls
+    -- Reset per-scale "what got touched" tracking. mid_first / mid_groups
+    -- persist across scales so previously-inserted pairs stay available
+    -- for pair-pair checks against the new pairs we're about to insert.
+    group_old_sizes = {}
+    touched_groups = {}
     local p_scale = game.create_profiler()
-    local candidates = enumerate_parls(scale)
+    local candidates = enumerate_parls(scale, prev_scale)
     stats.scale_insert_times[s_idx] = stats.t_enum_insert
     stats.scale_iterate_times[s_idx] = stats.t_enum_iterate
     stats.scale_candidates[s_idx] = #candidates
@@ -1165,6 +1188,7 @@ function M.compute(points, reaches, opts)
     stats.scale_pair_checks[s_idx] = pair_checks - pc_before
     stats.scale_angle_pass[s_idx] = angle_pass - ap_before
     stats.scale_chain_calls[s_idx] = chain_calls - cc_before
+    prev_scale = scale
   end
   stats.t_scale_total.stop()
 
