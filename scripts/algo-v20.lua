@@ -48,12 +48,10 @@ local EPS_GEOM = 1e-6
 local EPS_DIAG = 1e-6  -- tolerance for short_diag² == max(la², lb²) test
 local ROUND_SCALE = 10000  -- 4-decimal precision
 
--- v20 builds its scale schedule dynamically inside M.compute: doubling
--- from 32 until the last scale is ≥ the layout's longer bbox dimension,
--- so every pole pair is enumerated by exactly one scale (no cap, no
--- missed-because-too-big parls). The per-scale time and candidate count
--- are recorded in stats.scale_times / stats.scale_candidates so we can
--- see where time goes as the schedule grows.
+-- Hierarchical scale schedule for v20. At each step the iterate hot loop
+-- only sees pole pairs whose axis-aligned bbox is ≤ this scale, so small
+-- parls get found and prune the pair set before larger scales fire.
+local SCALES = { 32, 64, 128, 256 }
 local mfloor = math.floor
 local mabs = math.abs
 local msqrt = math.sqrt
@@ -284,50 +282,6 @@ function M.compute(points, reaches, opts)
   end
   stats.t_setup.stop()
 
-  -- v20 chain pruning state. Declared up here (before make_chain) so the
-  -- chain build path and the cache hit path can reject chains whose
-  -- intermediates are now interior to a previously accepted parl. The
-  -- helpers that populate pole_dead (point_in_parl_strict, mark_dead_in_parl)
-  -- live further down where pole_bucket and the SAT helpers are in scope.
-  local pole_dead = {}
-  local dead_count = 0
-
-  -- v20 cell clamping bounds. enumerate_parls(scale) iterates a (2*scale)²
-  -- bbox of point_bucket cells around each pole; once scale exceeds the
-  -- layout's extent, most of those cells fall outside the layout and the
-  -- table lookups are wasted (~1.4B no-op visits at scale 8192 in a 5400-
-  -- pole layout). Clamp the cell range to the actual occupied bbox so
-  -- large scales degenerate to a layout-wide sweep instead of an
-  -- infinity-wide one. Logic-preserving: the clamped-away cells are
-  -- empty by definition.
-  local layout_cx_min, layout_cx_max
-  local layout_cy_min, layout_cy_max
-  local layout_x_min, layout_x_max
-  local layout_y_min, layout_y_max
-  do
-    local lx_min, lx_max = pxs[1], pxs[1]
-    local ly_min, ly_max = pys[1], pys[1]
-    for i = 2, n do
-      local x = pxs[i]
-      local y = pys[i]
-      if x < lx_min then lx_min = x end
-      if x > lx_max then lx_max = x end
-      if y < ly_min then ly_min = y end
-      if y > ly_max then ly_max = y end
-    end
-    layout_x_min, layout_x_max = lx_min, lx_max
-    layout_y_min, layout_y_max = ly_min, ly_max
-    layout_cx_min = mfloor(lx_min / cell_size)
-    layout_cx_max = mfloor(lx_max / cell_size)
-    layout_cy_min = mfloor(ly_min / cell_size)
-    layout_cy_max = mfloor(ly_max / cell_size)
-    -- Reuse the bbox below for the dynamic SCALES schedule.
-    stats.layout_max_dim = lx_max - lx_min
-    if (ly_max - ly_min) > stats.layout_max_dim then
-      stats.layout_max_dim = ly_max - ly_min
-    end
-  end
-
   -- Reusable buffer for points_on_segment_strict's intermediate output.
   -- Cleared at the top of every call; caller reads pos_seg_ks[1..count].
   local pos_seg_count = 0
@@ -415,17 +369,6 @@ function M.compute(points, reaches, opts)
       if cached ~= nil then
         cache_hits = cache_hits + 1
         if cached == false then return nil end
-        -- v20.x chain pruning: a previously-valid cached chain may have
-        -- gained a dead intermediate since it was cached (a parl accepted
-        -- in a later scale absorbed the intermediate into its interior).
-        -- Re-walk the intermediates and reject if any died. We don't
-        -- update the cache entry — leaving it as-is keeps the chain
-        -- available again if later scales decide to drop the dead-pole
-        -- requirement (they don't, but invalidating would force a full
-        -- segment-scan rebuild on every future call).
-        for ci = 2, #cached - 1 do
-          if pole_dead[cached[ci]] then return nil end
-        end
         return cached
       end
     else
@@ -445,20 +388,6 @@ function M.compute(points, reaches, opts)
       local segdx = pxs[b] - pxs[a]
       local segdy = pys[b] - pys[a]
       if segdx * segdx + segdy * segdy > pair_reach_sq(a, b) then
-        row[hi] = false
-        return nil
-      end
-    end
-
-    -- v20.x chain pruning: if any intermediate is interior to an already
-    -- accepted parl, the chain "passes through" that parl. A side using
-    -- this chain would force the candidate Q to overlap (or fully sit
-    -- inside) the accepted parl, which SAT would reject downstream;
-    -- rejecting at chain build time skips the candidate construction +
-    -- SAT cost. Cache the rejection so subsequent calls hit the false
-    -- branch above immediately.
-    for ci = 2, #chain - 1 do
-      if pole_dead[chain[ci]] then
         row[hi] = false
         return nil
       end
@@ -647,12 +576,14 @@ function M.compute(points, reaches, opts)
     end
   end
 
-  -- v20 chain pruning state geometry helpers. The pole_dead / dead_count
-  -- locals themselves are declared earlier (right after t_setup.stop) so
-  -- make_chain can see them as upvalues. Dead poles are also filtered out
-  -- of subsequent scales' mid_groups insert. Boundary poles (corners and
-  -- chain intermediates on parl sides) stay alive — they may legitimately
-  -- be corners of adjacent parls.
+  -- v20 chain pruning state. pole_dead[i] = true once pole i is strictly
+  -- inside an accepted parl's convex hull. Dead poles are filtered out of
+  -- subsequent scales' mid_groups insert, so the next pass skips a pair
+  -- the moment one of its endpoints belongs to a parl already accepted.
+  -- Boundary poles (corners and chain intermediates on parl sides) stay
+  -- alive — they may legitimately be corners of adjacent parls.
+  local pole_dead = {}
+  local dead_count = 0
 
   -- Strict point-in-parl test using CCW corner order. Returns true only
   -- when the pole sits strictly inside (positive signed area against every
@@ -705,22 +636,13 @@ function M.compute(points, reaches, opts)
   end
 
   -- Iterate poles inside P's bbox (via point_bucket) and mark interior
-  -- ones as dead. Newly dead poles are also yanked out of their
-  -- point_bucket cell so the next scale's enumerate insert doesn't
-  -- iterate them at all (was paying lookup + dead-check overhead per
-  -- visit). The line bucket keeps the dead pole in place on purpose:
-  -- chain pruning relies on dead intermediates being PRESENT in the
-  -- sliced chain so it can reject the chain — removing them would let
-  -- the chain quietly stitch around the dead pole and lose the
-  -- "chain crosses parl interior" rejection.
+  -- ones as dead. Cheap because each parl's bbox is small relative to
+  -- the layout and we only inspect cells the bbox actually touches.
   local function mark_dead_in_parl(P)
     local cx_min = mfloor(P.bxmin / cell_size)
     local cx_max = mfloor(P.bxmax / cell_size)
     local cy_min = mfloor(P.bymin / cell_size)
     local cy_max = mfloor(P.bymax / cell_size)
-    -- Defer cell removals to a second pass so we don't mutate the cell
-    -- array while iterating it.
-    local newly_dead = {}
     for cx = cx_min, cx_max do
       local row = point_bucket[cx]
       if row then
@@ -732,25 +654,7 @@ function M.compute(points, reaches, opts)
               if not pole_dead[p] and point_in_parl_strict(p, P) then
                 pole_dead[p] = true
                 dead_count = dead_count + 1
-                newly_dead[#newly_dead + 1] = p
               end
-            end
-          end
-        end
-      end
-    end
-    for ndi = 1, #newly_dead do
-      local p = newly_dead[ndi]
-      local cx = mfloor(pxs[p] / cell_size)
-      local cy = mfloor(pys[p] / cell_size)
-      local row = point_bucket[cx]
-      if row then
-        local cell = row[cy]
-        if cell then
-          for ki = 1, #cell do
-            if cell[ki] == p then
-              table.remove(cell, ki)
-              break
             end
           end
         end
@@ -758,69 +662,43 @@ function M.compute(points, reaches, opts)
     end
   end
 
-  -- Persistent across the scale loop. Each scale appends only NEW pairs
-  -- (bbox in (prev_scale, scale]); group_old_sizes records each touched
-  -- group's size BEFORE this scale's first append, so iterate can identify
-  -- which entries are new and pair-check only NEW × ALL combinations.
-  -- pair-pair (old, old) was already done at an earlier scale and is not
-  -- redone, eliminating the cross-scale duplicate work that v20 had paid
-  -- for in every previous form.
-  local mid_first = {}
-  local mid_groups = {}
-  local group_old_sizes = {}    -- group ref → size before this scale's first append
-  local touched_groups = {}     -- groups that gained ≥1 entry this scale (iterate input)
-
-  -- Enumerate parallelogram candidates whose two pairs span the bbox band
-  -- (prev_scale, scale]. Pairs from earlier scales stay in mid_groups; this
-  -- call only inserts/iterates the newly-eligible pairs and their pair-pair
-  -- combinations against everything already there.
-  --
+  -- Enumerate parallelogram candidates restricted by scale and pole_dead.
+  -- Two pairs sharing a midpoint = diagonals of a parallelogram.
   -- v19 confirmation rule: short_diag ≥ max(la, lb). In squared form, with
   -- A=la², B=lb², dot=v_a·v_b:  2·|dot| ≤ min(A, B). Iso reflections fire
   -- per accepted parl in try_iso_emit when 2·|dot| = min(A, B) exactly.
   -- (Compare to v18: 4·dot² ≤ A·B, i.e. 60°≤θ≤120°.)
-  local function enumerate_parls(scale, prev_scale)
+  --
+  -- v20: pairs with bbox > scale and pairs touching a dead pole are
+  -- skipped at the insert step; the iterate hot loop never sees them.
+  local function enumerate_parls(scale)
     if n < 4 then return {} end
 
     stats.t_enum_insert = game.create_profiler()
-    -- Insert step. Pairs whose bbox is ≤ prev_scale were already added at
-    -- an earlier scale; we keep them in mid_groups and only append pairs
-    -- with max(|dx|, |dy|) > prev_scale (and ≤ scale). Dead poles are
-    -- absent from point_bucket cells (mark_dead_in_parl yanks them), so
-    -- only the outer-loop pole_dead[i] guard is needed — the inner loop
-    -- never sees dead j's.
+    -- v20 hot loop: iterate j candidates spatially via point_bucket, with
+    -- bbox(scale) + pole_dead filters applied at insert time so the
+    -- iterate stage only sees alive, in-scale pairs.
+    --   * 2-level int tables avoid string-key allocation.
+    --   * Pairs are packed as a single int (i * K + j); flat array storage.
+    --   * Singleton midpoints stay inline in mid_first; a group table is
+    --     allocated only when a second pair lands on the same midpoint.
+    --   * pixs / piys are int-keyed flat arrays in the canonical 4-decimal
+    --     fixed-point representation. The midpoint key is the integer sum
+    --     (pixs[i] + pixs[j], piys[i] + piys[j]) — exactly twice the
+    --     midpoint in fixed-point.
+    local mid_first = {}
+    local mid_groups = {}
     for i = 1, n do
       if not pole_dead[i] then
-        local pi_x = pxs[i]
-        local pi_y = pys[i]
-        -- A1 skip: at the largest scales prev_scale > 0 means a pole whose
-        -- farthest layout corner sits within prev_scale on both axes can
-        -- never form a NEW pair (one with bbox > prev_scale). Skip the
-        -- entire cell sweep for this pole. Saves ~25-30% of pole iterations
-        -- at scale 8192 in a 5520-wide layout where the central rectangle
-        -- of poles has all axis distances ≤ 4096.
-        local can_be_new = true
-        if prev_scale > 0 then
-          local mdx = pi_x - layout_x_min
-          if layout_x_max - pi_x > mdx then mdx = layout_x_max - pi_x end
-          local mdy = pi_y - layout_y_min
-          if layout_y_max - pi_y > mdy then mdy = layout_y_max - pi_y end
-          if mdx <= prev_scale and mdy <= prev_scale then
-            can_be_new = false
-          end
-        end
-        if can_be_new then
         local pix = pixs[i]
         local piy = piys[i]
         local i_packed = i * K
+        local pi_x = pxs[i]
+        local pi_y = pys[i]
         local cx_min = mfloor((pi_x - scale) / cell_size)
         local cx_max = mfloor((pi_x + scale) / cell_size)
         local cy_min = mfloor((pi_y - scale) / cell_size)
         local cy_max = mfloor((pi_y + scale) / cell_size)
-        if cx_min < layout_cx_min then cx_min = layout_cx_min end
-        if cx_max > layout_cx_max then cx_max = layout_cx_max end
-        if cy_min < layout_cy_min then cy_min = layout_cy_min end
-        if cy_max > layout_cy_max then cy_max = layout_cy_max end
         for cx = cx_min, cx_max do
           local row_p = point_bucket[cx]
           if row_p then
@@ -829,13 +707,12 @@ function M.compute(points, reaches, opts)
               if cell then
                 for ki = 1, #cell do
                   local j = cell[ki]
-                  if j > i then
+                  if j > i and not pole_dead[j] then
                     local dx = pxs[j] - pi_x
                     local dy = pys[j] - pi_y
                     local adx = dx >= 0 and dx or -dx
                     local ady = dy >= 0 and dy or -dy
-                    if adx <= scale and ady <= scale
-                       and (adx > prev_scale or ady > prev_scale) then
+                    if adx <= scale and ady <= scale then
                       local rx = pix + pixs[j]
                       local ry = piy + piys[j]
                       local packed = i_packed + j
@@ -849,19 +726,9 @@ function M.compute(points, reaches, opts)
                         if not row_g then row_g = {}; mid_groups[rx] = row_g end
                         local g = row_g[ry]
                         if not g then
-                          -- Group newly born from a singleton + this new pair.
-                          -- The singleton (`existing`) was inserted at an
-                          -- earlier scale; it counts as "old" so old_size = 1.
                           g = { existing, packed }
                           row_g[ry] = g
-                          group_old_sizes[g] = 1
-                          touched_groups[#touched_groups + 1] = g
                         else
-                          if not group_old_sizes[g] then
-                            -- First append to g this scale → snapshot size now.
-                            group_old_sizes[g] = #g
-                            touched_groups[#touched_groups + 1] = g
-                          end
                           g[#g + 1] = packed
                         end
                       end
@@ -872,29 +739,26 @@ function M.compute(points, reaches, opts)
             end
           end
         end
-        end  -- if can_be_new
-      end  -- if not pole_dead[i]
-    end  -- for i = 1, n
+      end
+    end
     stats.t_enum_insert.stop()
 
     stats.t_enum_iterate = game.create_profiler()
     local candidates = {}
-    for ti = 1, #touched_groups do
-      local grp = touched_groups[ti]
-      local old_size = group_old_sizes[grp]
-      local glen = #grp
-      for pi = old_size + 1, glen do
-        local pa = grp[pi]
-        local a = mfloor(pa / K)
-        local b = pa - a * K
-        if not pole_dead[a] and not pole_dead[b] then
-          for pj = 1, pi - 1 do
-            pair_checks = pair_checks + 1
-            local pb = grp[pj]
-            local c = mfloor(pb / K)
-            local d = pb - c * K
-            if not pole_dead[c] and not pole_dead[d]
-               and a ~= c and a ~= d and b ~= c and b ~= d then
+    for _, ry_row in pairs(mid_groups) do
+      for _, grp in pairs(ry_row) do
+        local glen = #grp
+        if glen >= 2 then
+          for pi = 1, glen do
+            local pa = grp[pi]
+            local a = mfloor(pa / K)
+            local b = pa - a * K
+            for pj = pi + 1, glen do
+              pair_checks = pair_checks + 1
+              local pb = grp[pj]
+              local c = mfloor(pb / K)
+              local d = pb - c * K
+              if a ~= c and a ~= d and b ~= c and b ~= d then
                 local i, j, k = a, c, d  -- l = b
                 local pix = pxs[i]; local piy = pys[i]
                 local v_a_x = pxs[j] - pix
@@ -968,13 +832,14 @@ function M.compute(points, reaches, opts)
                       end
                     end
                     end  -- if not skip_chain_block
-                  end  -- if angle_pass (parl rule)
-                end  -- if la2/lb2 nonzero
-              end  -- if distinct + dead-cd guard
-            end  -- for pj
-          end  -- if not dead a, b
-        end  -- for pi
-      end  -- for ti = 1, #touched_groups
+                  end
+                end
+              end
+            end
+          end
+        end
+      end
+    end
     stats.t_enum_iterate.stop()
     return candidates
   end
@@ -1158,59 +1023,15 @@ function M.compute(points, reaches, opts)
     end
   end
 
-  -- Dynamic scale schedule: double from 32 until the last scale covers
-  -- the layout's longer bbox dimension, so every pole pair is enumerable
-  -- at exactly one scale. No artificial cap — parls of any size present
-  -- in the layout get a chance. layout_max_dim was computed earlier
-  -- alongside the cell-clamping bounds.
-  local SCALES = {}
-  do
-    local s = 32
-    while s < stats.layout_max_dim do
-      SCALES[#SCALES + 1] = s
-      s = s * 2
-    end
-    SCALES[#SCALES + 1] = s
-  end
-  stats.scale_schedule = SCALES
-
   stats.t_scale_total = game.create_profiler()
   stats.scale_candidates = {}      -- per-scale candidate counts
   stats.scale_dead_after = {}      -- per-scale cumulative dead pole count
-  stats.scale_times = {}           -- per-scale elapsed-time profilers (full iter)
-  stats.scale_insert_times = {}    -- per-scale enumerate insert profilers
-  stats.scale_iterate_times = {}   -- per-scale enumerate iterate profilers
-  stats.scale_primary_after = {}   -- per-scale cumulative primary count
-  stats.scale_expansion_after = {} -- per-scale cumulative expansion count
-  stats.scale_pair_checks = {}     -- per-scale pair_checks delta
-  stats.scale_angle_pass = {}      -- per-scale angle_pass delta
-  stats.scale_chain_calls = {}     -- per-scale chain_calls delta
-  local prev_scale = 0
   for s_idx = 1, #SCALES do
     local scale = SCALES[s_idx]
-    local pc_before = pair_checks
-    local ap_before = angle_pass
-    local cc_before = chain_calls
-    -- Reset per-scale "what got touched" tracking. mid_first / mid_groups
-    -- persist across scales so previously-inserted pairs stay available
-    -- for pair-pair checks against the new pairs we're about to insert.
-    group_old_sizes = {}
-    touched_groups = {}
-    local p_scale = game.create_profiler()
-    local candidates = enumerate_parls(scale, prev_scale)
-    stats.scale_insert_times[s_idx] = stats.t_enum_insert
-    stats.scale_iterate_times[s_idx] = stats.t_enum_iterate
+    local candidates = enumerate_parls(scale)
     stats.scale_candidates[s_idx] = #candidates
     detect_phased_for_scale(candidates)
-    p_scale.stop()
-    stats.scale_times[s_idx] = p_scale
     stats.scale_dead_after[s_idx] = dead_count
-    stats.scale_primary_after[s_idx] = #primary_parls
-    stats.scale_expansion_after[s_idx] = #expansion_parls
-    stats.scale_pair_checks[s_idx] = pair_checks - pc_before
-    stats.scale_angle_pass[s_idx] = angle_pass - ap_before
-    stats.scale_chain_calls[s_idx] = chain_calls - cc_before
-    prev_scale = scale
   end
   stats.t_scale_total.stop()
 
