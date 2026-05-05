@@ -31,6 +31,9 @@ edge 집합을 산출하도록 동등성 유지.
 | [4e56e2a] | cell clamping: enumerate insert cell range를 layout bbox로 자름 | **421,600** | +22s 회귀, chain pruning re-walk overhead |
 | [fc56268] | mark_dead_in_parl이 point_bucket 셀에서도 dead 점 물리 제거 | (측정 안 함) | |
 | [67cf6d7] | **incremental midpoint matching** — mid_groups 스케일 간 유지, 새 페어×기존 페어만 검사 | **185,900** | **−235s, 큰 win** |
+| [e41e380] | A1: per-pole skip in insert when no new pair geometrically possible | (with B1) | scale 8192 insert ~1.8s 절약 |
+| [627001b] | B1: length-ratio filter (max_diag² ≤ 3·min_diag²) before parl rule | **193,000** | **+7s 회귀** — 5493 grid는 axis-aligned dominant라 ratio=1 필터 100% 통과 |
+| [bb2e683] | B1 revert | **~186,000** | A1만 유지 |
 
 총 누적: **131s (v19) → 185s (v20 현재)**. v20은 v19보다 느리지만
 hierarchical 구조를 갖춤. 다음 최적화 단계가 5s 목표를 위한 핵심.
@@ -182,12 +185,14 @@ Total: pair_checks=130M  angle_pass=16.1M  chain_calls=18.5M  cache_hits=16.9M m
   early return 되지만 enumerate 자체 비용은 발생. 신규 페어 0이면 enumerate의
   iterate 단계 skip.
 
-### Plan B. Length-ratio 필터 (예상 10-30s 절약, 위험)
+### Plan B. Length-ratio 필터 (시도 후 revert)
 
 평행사변형 규칙으로부터 도출: max(D1², D2²) ≤ 3 · min(D1², D2²) 가 필요조건.
 
-- [B1] iterate에서 la²/lb²/dot 계산 전에 D1², D2² 계산하고 ratio 검사. 거절시
-  sides 계산 skip. 거절률이 80% 이상이어야 net win이라 layout 의존적.
+- [B1] ❌ **revert** ([627001b] → [bb2e683]). 5493 grid는 axis-aligned 패턴이
+  dominant라 D1 = D2 (ratio=1)인 페어쌍이 대부분이라 필터 100% 통과.
+  필터 비용 13 ops × 130M pair_checks = +7s 회귀. 다른 layout (sheared parl
+  비율 높음) 에선 도움될 수 있지만 일반 케이스엔 부적합.
 
 ### Plan C. v1.21 side-search 알고리즘 (예상 50-150s 절약, 큰 작업)
 
@@ -244,3 +249,6 @@ layout 중 lattice 아닌 케이스 처리 필요.
 [4e56e2a]: ../../../commit/4e56e2a
 [fc56268]: ../../../commit/fc56268
 [67cf6d7]: ../../../commit/67cf6d7
+[e41e380]: ../../../commit/e41e380
+[627001b]: ../../../commit/627001b
+[bb2e683]: ../../../commit/bb2e683
