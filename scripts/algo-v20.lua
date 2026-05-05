@@ -292,6 +292,38 @@ function M.compute(points, reaches, opts)
   local pole_dead = {}
   local dead_count = 0
 
+  -- v20 cell clamping bounds. enumerate_parls(scale) iterates a (2*scale)²
+  -- bbox of point_bucket cells around each pole; once scale exceeds the
+  -- layout's extent, most of those cells fall outside the layout and the
+  -- table lookups are wasted (~1.4B no-op visits at scale 8192 in a 5400-
+  -- pole layout). Clamp the cell range to the actual occupied bbox so
+  -- large scales degenerate to a layout-wide sweep instead of an
+  -- infinity-wide one. Logic-preserving: the clamped-away cells are
+  -- empty by definition.
+  local layout_cx_min, layout_cx_max
+  local layout_cy_min, layout_cy_max
+  do
+    local lx_min, lx_max = pxs[1], pxs[1]
+    local ly_min, ly_max = pys[1], pys[1]
+    for i = 2, n do
+      local x = pxs[i]
+      local y = pys[i]
+      if x < lx_min then lx_min = x end
+      if x > lx_max then lx_max = x end
+      if y < ly_min then ly_min = y end
+      if y > ly_max then ly_max = y end
+    end
+    layout_cx_min = mfloor(lx_min / cell_size)
+    layout_cx_max = mfloor(lx_max / cell_size)
+    layout_cy_min = mfloor(ly_min / cell_size)
+    layout_cy_max = mfloor(ly_max / cell_size)
+    -- Reuse the bbox below for the dynamic SCALES schedule.
+    stats.layout_max_dim = lx_max - lx_min
+    if (ly_max - ly_min) > stats.layout_max_dim then
+      stats.layout_max_dim = ly_max - ly_min
+    end
+  end
+
   -- Reusable buffer for points_on_segment_strict's intermediate output.
   -- Cleared at the top of every call; caller reads pos_seg_ks[1..count].
   local pos_seg_count = 0
@@ -732,6 +764,10 @@ function M.compute(points, reaches, opts)
         local cx_max = mfloor((pi_x + scale) / cell_size)
         local cy_min = mfloor((pi_y - scale) / cell_size)
         local cy_max = mfloor((pi_y + scale) / cell_size)
+        if cx_min < layout_cx_min then cx_min = layout_cx_min end
+        if cx_max > layout_cx_max then cx_max = layout_cx_max end
+        if cy_min < layout_cy_min then cy_min = layout_cy_min end
+        if cy_max > layout_cy_max then cy_max = layout_cy_max end
         for cx = cx_min, cx_max do
           local row_p = point_bucket[cx]
           if row_p then
@@ -1059,28 +1095,16 @@ function M.compute(points, reaches, opts)
   -- Dynamic scale schedule: double from 32 until the last scale covers
   -- the layout's longer bbox dimension, so every pole pair is enumerable
   -- at exactly one scale. No artificial cap — parls of any size present
-  -- in the layout get a chance.
+  -- in the layout get a chance. layout_max_dim was computed earlier
+  -- alongside the cell-clamping bounds.
   local SCALES = {}
   do
-    local lx_min, lx_max = pxs[1], pxs[1]
-    local ly_min, ly_max = pys[1], pys[1]
-    for i = 2, n do
-      local x = pxs[i]
-      local y = pys[i]
-      if x < lx_min then lx_min = x end
-      if x > lx_max then lx_max = x end
-      if y < ly_min then ly_min = y end
-      if y > ly_max then ly_max = y end
-    end
-    local layout_max_dim = lx_max - lx_min
-    if (ly_max - ly_min) > layout_max_dim then layout_max_dim = ly_max - ly_min end
     local s = 32
-    while s < layout_max_dim do
+    while s < stats.layout_max_dim do
       SCALES[#SCALES + 1] = s
       s = s * 2
     end
     SCALES[#SCALES + 1] = s
-    stats.layout_max_dim = layout_max_dim
   end
   stats.scale_schedule = SCALES
 
