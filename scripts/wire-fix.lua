@@ -1,4 +1,4 @@
-local algo_v21 = require("scripts.algo-v21")
+local algo_v19 = require("scripts.algo-v19")
 
 local M = {}
 
@@ -49,7 +49,7 @@ function M.run(player_index, entities)
   local p_total = game.create_profiler()
 
   -- Phase 1: classify existing internal connections. External (out-of-selection)
-  -- wires aren't touched at all; internal ones survive the diff-apply if v21
+  -- wires aren't touched at all; internal ones survive the diff-apply if v19
   -- also wants them.
   local p_phase1 = game.create_profiler()
   local pole_set = {}
@@ -74,11 +74,11 @@ function M.run(player_index, entities)
   end
   p_phase1.stop()
 
-  -- Phase 2: pattern-aware layout (algo v21).
+  -- Phase 2: pattern-aware layout (algo v19).
   -- NOTE: the per-user "max connections per pole" setting is NOT honored in
-  -- v0.2 — v21 may produce more wires per pole than v0.1.0. Re-introducing
+  -- v0.2 — v19 may produce more wires per pole than v0.1.0. Re-introducing
   -- the cap is tracked for a follow-up.
-  local p_v21 = game.create_profiler()
+  local p_v19 = game.create_profiler()
   local points = {}
   local reaches = {}
   for i = 1, n do
@@ -86,14 +86,14 @@ function M.run(player_index, entities)
     points[i] = { x = p.position.x, y = p.position.y }
     reaches[i] = p.prototype.get_max_wire_distance(p.quality)
   end
-  local v21_edges, v21_parls, v21_iso, v21_stats = algo_v21.compute(points, reaches, {
+  local v19_edges, v19_parls, v19_iso, v19_stats = algo_v19.compute(points, reaches, {
     skip_chain_block = config.measure_skip_chain,
   })
-  p_v21.stop()
+  p_v19.stop()
 
   -- Phase 3: build wanted set keyed by pair_key(unit_number).
   local wanted = {}
-  for _, edge in ipairs(v21_edges) do
+  for _, edge in ipairs(v19_edges) do
     local pa, pb = poles[edge[1]], poles[edge[2]]
     wanted[pair_key(pa.unit_number, pb.unit_number)] = { pa, pb }
   end
@@ -132,61 +132,38 @@ function M.run(player_index, entities)
   p_diff.stop()
   p_total.stop()
 
-  notify(player, "wire-fix.done", n, #v21_edges)
+  notify(player, "wire-fix.done", n, #v19_edges)
 
   if config.dev_mode then
     local internal_count = 0
     for _ in pairs(internal_pairs) do internal_count = internal_count + 1 end
-    player.print({"", "[Wire Fix v0.2/v21] total: ", p_total})
+    player.print({"", "[Wire Fix v0.2/v19] total: ", p_total})
     player.print(string.format(
       "  poles=%d  internal_existing=%d  edges_wanted=%d  candidates=%d  primary=%d  expansion=%d  iso=%d  mst_cand=%d  api: disconnect=%d connect=%d",
-      n, internal_count, #v21_edges,
-      v21_stats.candidates or 0, v21_stats.primary or 0, v21_stats.expansion or 0,
-      #v21_iso, v21_stats.mst_cand_count or 0,
+      n, internal_count, #v19_edges,
+      v19_stats.candidates or 0, v19_stats.primary or 0, v19_stats.expansion or 0,
+      #v19_iso, v19_stats.mst_cand_count or 0,
       disconnect_calls, connect_calls))
-    player.print({"", "  phase1=", p_phase1, "  v21=", p_v21, "  diff=", p_diff})
+    player.print({"", "  phase1=", p_phase1, "  v19=", p_v19, "  diff=", p_diff})
     player.print({"",
-      "  setup=", v21_stats.t_setup,
-      "  scale_total=", v21_stats.t_scale_total,
-      "  iso=", v21_stats.t_iso})
-    if v21_stats.scale_schedule then
-      player.print(string.format(
-        "    layout_max_dim=%d  scales=%d", v21_stats.layout_max_dim or 0,
-        #v21_stats.scale_schedule))
-      local sched = v21_stats.scale_schedule
-      local sc = v21_stats.scale_candidates
-      local sd = v21_stats.scale_dead_after
-      local sp = v21_stats.scale_primary_after
-      local se = v21_stats.scale_expansion_after
-      local st = v21_stats.scale_times
-      local sit = v21_stats.scale_insert_times
-      local stt = v21_stats.scale_iterate_times
-      local spc = v21_stats.scale_pair_checks
-      local sap = v21_stats.scale_angle_pass
-      local scc = v21_stats.scale_chain_calls
-      for i = 1, #sched do
-        player.print({"", string.format(
-          "      scale=%d  cand=%d  primary=%d  expansion=%d  dead=%d  time=",
-          sched[i], sc[i] or 0, sp[i] or 0, se[i] or 0, sd[i] or 0), st[i]})
-        player.print({"", string.format(
-          "        pair_checks=%d  angle_pass=%d  chain_calls=%d  insert=",
-          spc[i] or 0, sap[i] or 0, scc[i] or 0), sit[i],
-          "  iterate=", stt[i]})
-      end
-    end
+      "  setup=", v19_stats.t_setup,
+      "  enumerate=", v19_stats.t_enumerate,
+      "    insert=", v19_stats.t_enum_insert,
+      "  iterate=", v19_stats.t_enum_iterate})
     player.print(string.format(
-      "    pair_checks=%d  angle_pass=%d  iso_pass=%d  iso_refl=%d  chain_calls=%d  chain_success=%d  dead=%d",
-      v21_stats.pair_checks or 0, v21_stats.angle_pass or 0,
-      v21_stats.iso_pass or 0, v21_stats.iso_refl_emit or 0,
-      v21_stats.chain_calls or 0, v21_stats.chain_success or 0,
-      v21_stats.dead_count or 0))
+      "    pair_checks=%d  angle_pass=%d  iso_pass=%d  iso_refl=%d  chain_calls=%d  chain_success=%d",
+      v19_stats.pair_checks or 0, v19_stats.angle_pass or 0,
+      v19_stats.iso_pass or 0, v19_stats.iso_refl_emit or 0,
+      v19_stats.chain_calls or 0, v19_stats.chain_success or 0))
     player.print(string.format(
       "    cache hits=%d misses=%d",
-      v21_stats.cache_hits or 0, v21_stats.cache_misses or 0))
+      v19_stats.cache_hits or 0, v19_stats.cache_misses or 0))
     player.print({"",
-      "  pattern_edges=", v21_stats.t_pattern_edges,
-      "  mst_cand=", v21_stats.t_mst_cand,
-      "  mst_closure=", v21_stats.t_mst_closure})
+      "  phase_loop=", v19_stats.t_phase_loop,
+      "  iso=", v19_stats.t_iso,
+      "  pattern_edges=", v19_stats.t_pattern_edges,
+      "  mst_cand=", v19_stats.t_mst_cand,
+      "  mst_closure=", v19_stats.t_mst_closure})
   end
 end
 
