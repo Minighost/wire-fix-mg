@@ -701,13 +701,22 @@ function M.compute(points, reaches, opts)
   end
 
   -- Iterate poles inside P's bbox (via point_bucket) and mark interior
-  -- ones as dead. Cheap because each parl's bbox is small relative to
-  -- the layout and we only inspect cells the bbox actually touches.
+  -- ones as dead. Newly dead poles are also yanked out of their
+  -- point_bucket cell so the next scale's enumerate insert doesn't
+  -- iterate them at all (was paying lookup + dead-check overhead per
+  -- visit). The line bucket keeps the dead pole in place on purpose:
+  -- chain pruning relies on dead intermediates being PRESENT in the
+  -- sliced chain so it can reject the chain — removing them would let
+  -- the chain quietly stitch around the dead pole and lose the
+  -- "chain crosses parl interior" rejection.
   local function mark_dead_in_parl(P)
     local cx_min = mfloor(P.bxmin / cell_size)
     local cx_max = mfloor(P.bxmax / cell_size)
     local cy_min = mfloor(P.bymin / cell_size)
     local cy_max = mfloor(P.bymax / cell_size)
+    -- Defer cell removals to a second pass so we don't mutate the cell
+    -- array while iterating it.
+    local newly_dead = {}
     for cx = cx_min, cx_max do
       local row = point_bucket[cx]
       if row then
@@ -719,7 +728,25 @@ function M.compute(points, reaches, opts)
               if not pole_dead[p] and point_in_parl_strict(p, P) then
                 pole_dead[p] = true
                 dead_count = dead_count + 1
+                newly_dead[#newly_dead + 1] = p
               end
+            end
+          end
+        end
+      end
+    end
+    for ndi = 1, #newly_dead do
+      local p = newly_dead[ndi]
+      local cx = mfloor(pxs[p] / cell_size)
+      local cy = mfloor(pys[p] / cell_size)
+      local row = point_bucket[cx]
+      if row then
+        local cell = row[cy]
+        if cell then
+          for ki = 1, #cell do
+            if cell[ki] == p then
+              table.remove(cell, ki)
+              break
             end
           end
         end
