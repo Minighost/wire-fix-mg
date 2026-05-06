@@ -313,6 +313,11 @@ function M.compute(points, reaches, opts)
   local cache_hits = 0
   local cache_misses = 0
 
+  -- pole_dead must exist before make_chain since the chain construction now
+  -- rejects chains containing dead poles (closure capture).
+  local pole_dead = {}
+  local dead_count = 0
+
   local reaches_sq = {}
   for i = 1, n do reaches_sq[i] = reaches[i] * reaches[i] end
   local function pair_reach_sq(i, j)
@@ -519,9 +524,6 @@ function M.compute(points, reaches, opts)
       end
     end
   end
-
-  local pole_dead = {}
-  local dead_count = 0
 
   local function point_in_parl_strict(p_idx, P)
     local px = pxs[p_idx]
