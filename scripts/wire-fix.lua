@@ -150,18 +150,13 @@ function M.run(player_index, entities)
       "  setup=", v21_stats.t_setup,
       "  scale_total=", v21_stats.t_scale_total,
       "  iso=", v21_stats.t_iso})
-    if v21_stats.scale_candidates and v21_stats.scales then
+    if v21_stats.scale_candidates then
       local sc = v21_stats.scale_candidates
       local sd = v21_stats.scale_dead_after
-      local scales = v21_stats.scales
-      local cand_parts = { "    per-scale cands:" }
-      local dead_parts = { "    per-scale dead :" }
-      for i = 1, #scales do
-        cand_parts[#cand_parts + 1] = string.format(" %d=%d", scales[i], sc[i] or 0)
-        dead_parts[#dead_parts + 1] = string.format(" %d=%d", scales[i], sd[i] or 0)
-      end
-      player.print(table.concat(cand_parts))
-      player.print(table.concat(dead_parts))
+      player.print(string.format(
+        "    per-scale candidates: 32=%d 64=%d 128=%d 256=%d  dead_after: 32=%d 64=%d 128=%d 256=%d",
+        sc[1] or 0, sc[2] or 0, sc[3] or 0, sc[4] or 0,
+        sd[1] or 0, sd[2] or 0, sd[3] or 0, sd[4] or 0))
     end
     player.print(string.format(
       "    pair_checks=%d  angle_pass=%d  iso_pass=%d  iso_refl=%d  chain_calls=%d  chain_success=%d  dead=%d",
@@ -178,9 +173,8 @@ function M.run(player_index, entities)
       v21_stats.edge_isect_calls or 0, v21_stats.edge_isect_reject or 0,
       v21_stats.chord_reject or 0))
     player.print(string.format(
-      "    cache hits=%d misses=%d  chain_dead_reject=%d",
-      v21_stats.cache_hits or 0, v21_stats.cache_misses or 0,
-      v21_stats.chain_dead_reject or 0))
+      "    cache hits=%d misses=%d",
+      v21_stats.cache_hits or 0, v21_stats.cache_misses or 0))
     player.print({"",
       "  pattern_edges=", v21_stats.t_pattern_edges,
       "  mst_cand=", v21_stats.t_mst_cand,
