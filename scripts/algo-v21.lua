@@ -795,11 +795,11 @@ function M.compute(points, reaches, opts)
                           p2_x_checks = p2_x_checks + 1
                           local x_X = pxs[X]
                           local y_X = pys[X]
-                          local αx = x_X - px_P
-                          local βy = y_X - py_P
-                          if mabs(αx) <= half_L + EPS_GEOM
-                             and βy >= L * SQRT3_2 - EPS_GEOM
-                             and βy <= scale + EPS_GEOM then
+                          local off_x = x_X - px_P  -- = α in lens spec
+                          local off_y = y_X - py_P  -- = β in lens spec
+                          if mabs(off_x) <= half_L + EPS_GEOM
+                             and off_y >= L * SQRT3_2 - EPS_GEOM
+                             and off_y <= scale + EPS_GEOM then
                             p2_lens_pass = p2_lens_pass + 1
                             p2_y_lookups = p2_y_lookups + 1
                             local c2 = build_phase2_candidate(P, Q, X)
