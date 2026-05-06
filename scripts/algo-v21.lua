@@ -284,6 +284,23 @@ function M.compute(points, reaches, opts)
     end
   end
 
+  -- Phase 4 (rotated frame): every non-axis-aligned line direction acts as
+  -- the "horizontal" anchor of a phase-2-style lens search. We flatten such
+  -- lines into a single list once so the per-scale loop just iterates this
+  -- array instead of re-traversing the nested lines table.
+  local diag_lines = {}
+  for ndx, row_a in pairs(lines) do
+    for ndy, row_b in pairs(row_a) do
+      if not ((ndx == 1 and ndy == 0) or (ndx == 0 and ndy == 1)) then
+        for _, line in pairs(row_b) do
+          if #line.poles >= 2 then
+            diag_lines[#diag_lines + 1] = line
+          end
+        end
+      end
+    end
+  end
+
   stats.t_setup.stop()
 
   local pos_seg_count = 0
@@ -691,6 +708,57 @@ function M.compute(points, reaches, opts)
     }
   end
 
+  -- v21 phase 4: build a candidate slanted parl from a non-axis bottom edge
+  -- (P, Q) and a third corner X. The 4th corner Y sits at X + (Q − P) (i.e.
+  -- the same direction-d shift Q underwent from P), looked up via pos_to_idx.
+  -- Caller has already lens-validated X in the rotated (α, β) frame.
+  local function build_phase4_candidate(P, Q, X)
+    local rx_Y = pixs[X] + (pixs[Q] - pixs[P])
+    local ry_Y = piys[X] + (piys[Q] - piys[P])
+    local row = pos_to_idx[rx_Y]
+    local Y = row and row[ry_Y]
+    if not Y or pole_dead[Y] or Y == P or Y == Q or Y == X then return nil end
+
+    -- CCW: P → Q → Y → X with v_a = Q-P (along d), v_b = X-P (= α·d + β·d_perp).
+    -- cross_2d(v_a, v_b) = L · β > 0 since β > 0 by lens; same sign as phase 2.
+    local cc1, cc2, cc3, cc4 = P, Q, Y, X
+
+    chain_calls = chain_calls + 1
+    local ch1 = make_chain(cc1, cc2); if ch1 == nil then return nil end
+    chain_success = chain_success + 1
+    chain_calls = chain_calls + 1
+    local ch2 = make_chain(cc2, cc3); if ch2 == nil then return nil end
+    chain_success = chain_success + 1
+    chain_calls = chain_calls + 1
+    local ch3 = make_chain(cc3, cc4); if ch3 == nil then return nil end
+    chain_success = chain_success + 1
+    chain_calls = chain_calls + 1
+    local ch4 = make_chain(cc4, cc1); if ch4 == nil then return nil end
+    chain_success = chain_success + 1
+
+    local x1, x2, x3, x4 = pxs[cc1], pxs[cc2], pxs[cc3], pxs[cc4]
+    local y1, y2, y3, y4 = pys[cc1], pys[cc2], pys[cc3], pys[cc4]
+    local va_x = x2 - x1
+    local va_y = y2 - y1
+    local vb_x = x4 - x1
+    local vb_y = y4 - y1
+    local bxmin, bxmax = x1, x1
+    if x2 < bxmin then bxmin = x2 end; if x2 > bxmax then bxmax = x2 end
+    if x3 < bxmin then bxmin = x3 end; if x3 > bxmax then bxmax = x3 end
+    if x4 < bxmin then bxmin = x4 end; if x4 > bxmax then bxmax = x4 end
+    local bymin, bymax = y1, y1
+    if y2 < bymin then bymin = y2 end; if y2 > bymax then bymax = y2 end
+    if y3 < bymin then bymin = y3 end; if y3 > bymax then bymax = y3 end
+    if y4 < bymin then bymin = y4 end; if y4 > bymax then bymax = y4 end
+    return {
+      corners = { cc1, cc2, cc3, cc4 },
+      chains = { ch1, ch2, ch3, ch4 },
+      area = mabs(cross_2d(va_x, va_y, vb_x, vb_y)),
+      bxmin = bxmin, bxmax = bxmax,
+      bymin = bymin, bymax = bymax,
+    }
+  end
+
   -- Phase classification (matches v20). 0 = axis-rect, 1 = horiz-aligned,
   -- 2 = vert-aligned, 3 = diagonal. Drives phase-priority dispatch.
   local function parl_phase(P)
@@ -866,6 +934,98 @@ function M.compute(points, reaches, opts)
                               if w > prev_scale or h > prev_scale then
                                 candidates[#candidates + 1] = c3
                               end
+                            end
+                          end
+                        end
+                      end
+                    end
+                  end
+                end
+              end
+            end
+          end
+        end
+      end
+    end
+
+    -- Phase 4: rotated-frame anchor. For every non-axis line direction d,
+    -- treat (P, Q) on that line as the bottom edge and search lens region
+    -- in the rotated (α, β) frame where α is along d and β is along d_perp.
+    -- Catches parls with no axis-aligned side. Phases 1–3 cover any parl
+    -- that has ≥1 axis-aligned side.
+    local scale_sq = scale * scale
+    for li = 1, #diag_lines do
+      local line = diag_lines[li]
+      local poles_in_line = line.poles
+      local n_in_line = #poles_in_line
+      for p_idx = 1, n_in_line do
+        local P = poles_in_line[p_idx]
+        if not pole_dead[P] then
+          local px_P = pxs[P]
+          local py_P = pys[P]
+          for q_idx = p_idx + 1, n_in_line do
+            local Q = poles_in_line[q_idx]
+            if pole_dead[Q] then break end
+            local dx_PQ = pxs[Q] - px_P
+            local dy_PQ = pys[Q] - py_P
+            local L_sq = dx_PQ * dx_PQ + dy_PQ * dy_PQ
+            if L_sq > scale_sq then break end
+            pair_checks = pair_checks + 1
+
+            local L = msqrt(L_sq)
+            local dx = dx_PQ / L
+            local dy = dy_PQ / L
+            -- d_perp = (-dy, dx), 90° CCW from d.
+            local half_L = L * 0.5
+            local L_s32 = L * SQRT3_2
+
+            -- Lens corners in (α, β) = {(±L/2, L·√3/2), (±L/2, scale)},
+            -- transformed to xy via P + α·d + β·d_perp.
+            local a1 = -half_L * dx + L_s32 * (-dy)
+            local a2 =  half_L * dx + L_s32 * (-dy)
+            local a3 =  half_L * dx + scale * (-dy)
+            local a4 = -half_L * dx + scale * (-dy)
+            local b1 = -half_L * dy + L_s32 * dx
+            local b2 =  half_L * dy + L_s32 * dx
+            local b3 =  half_L * dy + scale * dx
+            local b4 = -half_L * dy + scale * dx
+            local x_min = a1; if a2 < x_min then x_min = a2 end; if a3 < x_min then x_min = a3 end; if a4 < x_min then x_min = a4 end
+            local x_max = a1; if a2 > x_max then x_max = a2 end; if a3 > x_max then x_max = a3 end; if a4 > x_max then x_max = a4 end
+            local y_min = b1; if b2 < y_min then y_min = b2 end; if b3 < y_min then y_min = b3 end; if b4 < y_min then y_min = b4 end
+            local y_max = b1; if b2 > y_max then y_max = b2 end; if b3 > y_max then y_max = b3 end; if b4 > y_max then y_max = b4 end
+            x_min = x_min + px_P; x_max = x_max + px_P
+            y_min = y_min + py_P; y_max = y_max + py_P
+
+            local cx_min = mfloor(x_min / cell_size)
+            local cx_max = mfloor(x_max / cell_size)
+            local cy_min = mfloor(y_min / cell_size)
+            local cy_max = mfloor(y_max / cell_size)
+            for cx = cx_min, cx_max do
+              local row_p = point_bucket[cx]
+              if row_p then
+                for cy = cy_min, cy_max do
+                  local cell = row_p[cy]
+                  if cell then
+                    for ki = 1, #cell do
+                      local X = cell[ki]
+                      if not pole_dead[X] and X ~= P and X ~= Q then
+                        p2_x_checks = p2_x_checks + 1
+                        local vx = pxs[X] - px_P
+                        local vy = pys[X] - py_P
+                        -- Project onto rotated frame.
+                        local alpha = vx * dx + vy * dy
+                        local beta  = -vx * dy + vy * dx
+                        if mabs(alpha) <= half_L + EPS_GEOM
+                           and beta >= L_s32 - EPS_GEOM
+                           and beta <= scale + EPS_GEOM then
+                          p2_lens_pass = p2_lens_pass + 1
+                          p2_y_lookups = p2_y_lookups + 1
+                          local c4 = build_phase4_candidate(P, Q, X)
+                          if c4 then
+                            local w = c4.bxmax - c4.bxmin
+                            local h = c4.bymax - c4.bymin
+                            if w > prev_scale or h > prev_scale then
+                              candidates[#candidates + 1] = c4
                             end
                           end
                         end
