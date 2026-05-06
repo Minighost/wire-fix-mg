@@ -36,7 +36,11 @@ local EPS_GEOM = 1e-6
 local EPS_DIAG = 1e-6
 local ROUND_SCALE = 10000
 
-local SCALES = { 32, 64, 128, 256 }
+-- SCALES is built dynamically per call from the actual layout extent — see
+-- the "Scale schedule" block inside M.compute. The fixed {32, 64, 128, 256}
+-- v20 schedule capped at bbox 256; v21 keeps doubling until the full layout
+-- is covered so isolated big primaries (no smaller cousin to seed expansion)
+-- are still detected.
 local SQRT3_2 = 0.86602540378443864676  -- √3/2, phase 2 lens β bound coefficient
 local mfloor = math.floor
 local mabs = math.abs
@@ -1344,6 +1348,33 @@ function M.compute(points, reaches, opts)
       end
     end
   end
+
+  -- Scale schedule: start at 32 and double until the largest scale covers
+  -- the full layout extent. Each scale s only emits candidates whose bbox
+  -- > prev_scale (= s/2), so smaller scales never re-do larger ones'
+  -- territory. The biggest scale catches isolated primaries that have no
+  -- smaller cousin to seed expansion from.
+  local lo_x, lo_y, hi_x, hi_y = math.huge, math.huge, -math.huge, -math.huge
+  for i = 1, n do
+    local p = points[i]
+    if p.x < lo_x then lo_x = p.x end
+    if p.x > hi_x then hi_x = p.x end
+    if p.y < lo_y then lo_y = p.y end
+    if p.y > hi_y then hi_y = p.y end
+  end
+  local extent_x = hi_x - lo_x
+  local extent_y = hi_y - lo_y
+  local extent = extent_x > extent_y and extent_x or extent_y
+  local SCALES = {}
+  do
+    local s = 32
+    SCALES[1] = s
+    while s < extent do
+      s = s * 2
+      SCALES[#SCALES + 1] = s
+    end
+  end
+  stats.scales = SCALES
 
   stats.t_scale_total = game.create_profiler()
   stats.scale_candidates = {}
