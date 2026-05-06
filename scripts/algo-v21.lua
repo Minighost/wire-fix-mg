@@ -371,67 +371,9 @@ function M.compute(points, reaches, opts)
     return _make_chain_inner(lo, hi)
   end
 
-  local function quads_overlap(P_corners, Q_corners)
-    local pp1 = points[P_corners[1]]
-    local pp2 = points[P_corners[2]]
-    local pp3 = points[P_corners[3]]
-    local pp4 = points[P_corners[4]]
-    local qp1 = points[Q_corners[1]]
-    local qp2 = points[Q_corners[2]]
-    local qp3 = points[Q_corners[3]]
-    local qp4 = points[Q_corners[4]]
-    local pp1x, pp1y = pp1.x, pp1.y
-    local pp2x, pp2y = pp2.x, pp2.y
-    local pp3x, pp3y = pp3.x, pp3.y
-    local pp4x, pp4y = pp4.x, pp4.y
-    local qp1x, qp1y = qp1.x, qp1.y
-    local qp2x, qp2y = qp2.x, qp2.y
-    local qp3x, qp3y = qp3.x, qp3.y
-    local qp4x, qp4y = qp4.x, qp4.y
-
-    for axis_idx = 1, 4 do
-      local ax, ay
-      if axis_idx == 1 then
-        ax = pp2y - pp1y; ay = pp1x - pp2x
-      elseif axis_idx == 2 then
-        ax = pp3y - pp2y; ay = pp2x - pp3x
-      elseif axis_idx == 3 then
-        ax = qp2y - qp1y; ay = qp1x - qp2x
-      else
-        ax = qp3y - qp2y; ay = qp2x - qp3x
-      end
-      if ax * ax + ay * ay >= 1e-18 then
-        local p1 = pp1x * ax + pp1y * ay
-        local p2 = pp2x * ax + pp2y * ay
-        local p3 = pp3x * ax + pp3y * ay
-        local p4 = pp4x * ax + pp4y * ay
-        local pmin, pmax = p1, p1
-        if p2 < pmin then pmin = p2 end
-        if p2 > pmax then pmax = p2 end
-        if p3 < pmin then pmin = p3 end
-        if p3 > pmax then pmax = p3 end
-        if p4 < pmin then pmin = p4 end
-        if p4 > pmax then pmax = p4 end
-
-        local q1 = qp1x * ax + qp1y * ay
-        local q2 = qp2x * ax + qp2y * ay
-        local q3 = qp3x * ax + qp3y * ay
-        local q4 = qp4x * ax + qp4y * ay
-        local qmin, qmax = q1, q1
-        if q2 < qmin then qmin = q2 end
-        if q2 > qmax then qmax = q2 end
-        if q3 < qmin then qmin = q3 end
-        if q3 > qmax then qmax = q3 end
-        if q4 < qmin then qmin = q4 end
-        if q4 > qmax then qmax = q4 end
-
-        if pmax < qmin + EPS or qmax < pmin + EPS then
-          return false
-        end
-      end
-    end
-    return true
-  end
+  -- v21: SAT (quads_overlap) and parl_contains_parl removed; conflict
+  -- check is now chain-segment intersection vs edge_bucket — see
+  -- parl_chains_intersect_existing further below.
 
   local accepted_iso_refl_tris = {}
   local seen_iso = {}
@@ -525,29 +467,6 @@ function M.compute(points, reaches, opts)
       local bx, by = pxs[b], pys[b]
       local cross = (bx - ax) * (py - ay) - (by - ay) * (px - ax)
       if cross <= EPS_GEOM then return false end
-    end
-    return true
-  end
-
-  local function point_in_parl_inclusive(p_idx, P)
-    local px = pxs[p_idx]
-    local py = pys[p_idx]
-    local c = P.corners
-    for i = 1, 4 do
-      local a = c[i]
-      local b = c[(i % 4) + 1]
-      local ax, ay = pxs[a], pys[a]
-      local bx, by = pxs[b], pys[b]
-      local cross = (bx - ax) * (py - ay) - (by - ay) * (px - ax)
-      if cross < -EPS_GEOM then return false end
-    end
-    return true
-  end
-
-  local function parl_contains_parl(P, Q)
-    local qc = Q.corners
-    for i = 1, 4 do
-      if not point_in_parl_inclusive(qc[i], P) then return false end
     end
     return true
   end
@@ -909,105 +828,12 @@ function M.compute(points, reaches, opts)
 
   local accepted_parls = {}
 
-  -- v21 phase-priority dispatch: split candidates by phase, sort each phase
-  -- by area asc, then process phase 0 → 1 → 2 → 3. Within each phase, accept
-  -- via SAT non-overlap (with containment override) against cumulative
-  -- primary + expansion. Mirrors v20's detect_phased_for_scale.
-  local function detect_phased_for_scale(candidates)
-    if #candidates == 0 then return end
-    local phases = { {}, {}, {}, {} }
-    for _, P in ipairs(candidates) do
-      local ph = parl_phase(P) + 1
-      phases[ph][#phases[ph] + 1] = P
-    end
-    for ph = 1, 4 do
-      table.sort(phases[ph], function(a, b) return a.area < b.area end)
-    end
-
-    for ph = 1, 4 do
-      for _, P in ipairs(phases[ph]) do
-        local p_key = quad_key(P.corners)
-        if not all_seen[p_key] then
-          local conflict = false
-          local p_bxmin, p_bxmax = P.bxmin, P.bxmax
-          local p_bymin, p_bymax = P.bymin, P.bymax
-          for _, Q in ipairs(primary_parls) do
-            if p_bxmin <= Q.bxmax and p_bxmax >= Q.bxmin
-               and p_bymin <= Q.bymax and p_bymax >= Q.bymin then
-              if quads_overlap(P.corners, Q.corners) and not parl_contains_parl(P, Q) then
-                conflict = true; break
-              end
-            end
-          end
-          if not conflict then
-            for _, Q in ipairs(expansion_parls) do
-              if p_bxmin <= Q.bxmax and p_bxmax >= Q.bxmin
-                 and p_bymin <= Q.bymax and p_bymax >= Q.bymin then
-                if quads_overlap(P.corners, Q.corners) and not parl_contains_parl(P, Q) then
-                  conflict = true; break
-                end
-              end
-            end
-          end
-          if not conflict then
-            primary_parls[#primary_parls + 1] = P
-            all_seen[p_key] = true
-            mark_dead_in_parl(P)
-            for _, E in ipairs(expand_parl(P)) do
-              local k = quad_key(E.corners)
-              if not all_seen[k] then
-                all_seen[k] = true
-                expansion_parls[#expansion_parls + 1] = E
-                mark_dead_in_parl(E)
-              end
-            end
-          end
-        end
-      end
-    end
-  end
-
-  stats.t_scale_total = game.create_profiler()
-  stats.scale_candidates = {}
-  stats.scale_dead_after = {}
-  for s_idx = 1, #SCALES do
-    local scale = SCALES[s_idx]
-    local prev_scale = s_idx > 1 and SCALES[s_idx - 1] or 0
-    local candidates = enumerate_for_scale(scale, prev_scale)
-    stats.scale_candidates[s_idx] = #candidates
-    detect_phased_for_scale(candidates)
-    stats.scale_dead_after[s_idx] = dead_count
-  end
-  stats.t_scale_total.stop()
-  stats.p2_x_checks = p2_x_checks
-  stats.p2_lens_pass = p2_lens_pass
-  stats.p2_y_lookups = p2_y_lookups
-
-  for _, P in ipairs(primary_parls) do
-    accepted_parls[#accepted_parls + 1] = P
-  end
-  for _, P in ipairs(expansion_parls) do
-    accepted_parls[#accepted_parls + 1] = P
-  end
-  stats.primary = #primary_parls
-  stats.expansion = #expansion_parls
-  stats.candidates = #primary_parls + #expansion_parls
-  stats.pair_checks = pair_checks
-  stats.angle_pass = angle_pass
-  stats.chain_calls = chain_calls
-  stats.chain_success = chain_success
-  stats.dead_count = dead_count
-
-  stats.t_iso = game.create_profiler()
-  for _, P in ipairs(primary_parls) do try_iso_emit(P) end
-  for _, P in ipairs(expansion_parls) do try_iso_emit(P) end
-  stats.t_iso.stop()
-  stats.iso_pass = iso_pass
-  stats.iso_refl_emit = iso_refl_emit
-  stats.cache_hits = cache_hits
-  stats.cache_misses = cache_misses
-
-  -- Pattern edges + MST closure (identical to v20).
+  -- ---------------------------------------------------------------------
+  -- Edge infrastructure (moved earlier vs v20 layout): the conflict check
+  -- below uses chain-segment vs edge-bucket intersection, so the bucket
+  -- and Union-Find must exist before the scale loop. MST closure later
+  -- reuses the same structures.
+  -- ---------------------------------------------------------------------
   local edges = {}
   local edge_set = {}
   local edge_segs = {}
@@ -1103,14 +929,132 @@ function M.compute(points, reaches, opts)
     return true
   end
 
-  stats.t_pattern_edges = game.create_profiler()
-  for _, P in ipairs(accepted_parls) do
-    for _, chain in ipairs(P.chains) do
-      for ci = 1, #chain - 1 do
-        add_edge_unchecked(chain[ci], chain[ci + 1])
+  -- v21 conflict-check counters.
+  local edge_isect_calls = 0   -- # of bucket_any_intersect calls during accept
+  local edge_isect_reject = 0  -- # of candidates rejected by intersection
+
+  -- Add a parl's chain segments to the edge bucket. Called when a parl is
+  -- accepted (primary or expansion); subsequent candidates' chain segments
+  -- are intersection-checked against these.
+  local function add_parl_edges(P)
+    for _, ch in ipairs(P.chains) do
+      for ci = 1, #ch - 1 do
+        add_edge_unchecked(ch[ci], ch[ci + 1])
       end
     end
   end
+
+  -- Returns true iff any chain segment of P transversally crosses an edge
+  -- already in edge_bucket. Boundary touch (endpoint-shared, collinear)
+  -- doesn't count as a crossing — segs_intersect handles that. Equivalent
+  -- to v20's SAT non-overlap with containment override:
+  --   * containment (Q inside P, or P inside Q): no edge crosses → pass
+  --   * shared side / shared corner: endpoint exclusion → pass
+  --   * partial overlap (boundary cross): transversal intersection → reject
+  local function parl_chains_intersect_existing(P)
+    for _, ch in ipairs(P.chains) do
+      for ci = 1, #ch - 1 do
+        local a, b = ch[ci], ch[ci + 1]
+        local pa, pb = points[a], points[b]
+        edge_isect_calls = edge_isect_calls + 1
+        if bucket_any_intersect(pa.x, pa.y, pb.x, pb.y) then
+          return true
+        end
+      end
+    end
+    return false
+  end
+
+  -- v21 phase-priority dispatch: split candidates by phase, sort each phase
+  -- by area asc, then process phase 0 → 1 → 2 → 3. Conflict via
+  -- parl_chains_intersect_existing replaces v20's SAT loop.
+  local function detect_phased_for_scale(candidates)
+    if #candidates == 0 then return end
+    local phases = { {}, {}, {}, {} }
+    for _, P in ipairs(candidates) do
+      local ph = parl_phase(P) + 1
+      phases[ph][#phases[ph] + 1] = P
+    end
+    for ph = 1, 4 do
+      table.sort(phases[ph], function(a, b) return a.area < b.area end)
+    end
+
+    for ph = 1, 4 do
+      for _, P in ipairs(phases[ph]) do
+        local p_key = quad_key(P.corners)
+        if not all_seen[p_key] then
+          if parl_chains_intersect_existing(P) then
+            edge_isect_reject = edge_isect_reject + 1
+          else
+            primary_parls[#primary_parls + 1] = P
+            all_seen[p_key] = true
+            mark_dead_in_parl(P)
+            add_parl_edges(P)
+            -- Expansion lattice cascade. v20 trusts the cascade as
+            -- conflict-free vs the parent, so we only dedup via all_seen
+            -- and skip the intersection check on E. Edges still feed the
+            -- bucket so later scales see them.
+            for _, E in ipairs(expand_parl(P)) do
+              local k = quad_key(E.corners)
+              if not all_seen[k] then
+                all_seen[k] = true
+                expansion_parls[#expansion_parls + 1] = E
+                mark_dead_in_parl(E)
+                add_parl_edges(E)
+              end
+            end
+          end
+        end
+      end
+    end
+  end
+
+  stats.t_scale_total = game.create_profiler()
+  stats.scale_candidates = {}
+  stats.scale_dead_after = {}
+  for s_idx = 1, #SCALES do
+    local scale = SCALES[s_idx]
+    local prev_scale = s_idx > 1 and SCALES[s_idx - 1] or 0
+    local candidates = enumerate_for_scale(scale, prev_scale)
+    stats.scale_candidates[s_idx] = #candidates
+    detect_phased_for_scale(candidates)
+    stats.scale_dead_after[s_idx] = dead_count
+  end
+  stats.t_scale_total.stop()
+  stats.p2_x_checks = p2_x_checks
+  stats.p2_lens_pass = p2_lens_pass
+  stats.p2_y_lookups = p2_y_lookups
+  stats.edge_isect_calls = edge_isect_calls
+  stats.edge_isect_reject = edge_isect_reject
+
+  for _, P in ipairs(primary_parls) do
+    accepted_parls[#accepted_parls + 1] = P
+  end
+  for _, P in ipairs(expansion_parls) do
+    accepted_parls[#accepted_parls + 1] = P
+  end
+  stats.primary = #primary_parls
+  stats.expansion = #expansion_parls
+  stats.candidates = #primary_parls + #expansion_parls
+  stats.pair_checks = pair_checks
+  stats.angle_pass = angle_pass
+  stats.chain_calls = chain_calls
+  stats.chain_success = chain_success
+  stats.dead_count = dead_count
+
+  stats.t_iso = game.create_profiler()
+  for _, P in ipairs(primary_parls) do try_iso_emit(P) end
+  for _, P in ipairs(expansion_parls) do try_iso_emit(P) end
+  stats.t_iso.stop()
+  stats.iso_pass = iso_pass
+  stats.iso_refl_emit = iso_refl_emit
+  stats.cache_hits = cache_hits
+  stats.cache_misses = cache_misses
+
+  -- Parl chain edges are already in edge_bucket / edges (added by
+  -- add_parl_edges during accept). Only iso reflection tris need adding,
+  -- with intersection check vs the planar parl edge graph.
+  stats.t_pattern_edges = game.create_profiler()
   for _, T in ipairs(accepted_iso_refl_tris) do
     local sa, sb, x = T[1], T[2], T[3]
     add_edge_checked(sa, sb)
