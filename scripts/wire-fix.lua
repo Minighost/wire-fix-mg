@@ -169,8 +169,9 @@ function M.run(player_index, entities)
       v21_stats.p2_x_checks or 0, v21_stats.p2_lens_pass or 0,
       v21_stats.p2_y_lookups or 0))
     player.print(string.format(
-      "    edge_isect calls=%d reject=%d",
-      v21_stats.edge_isect_calls or 0, v21_stats.edge_isect_reject or 0))
+      "    edge_isect calls=%d reject=%d  chord_reject=%d",
+      v21_stats.edge_isect_calls or 0, v21_stats.edge_isect_reject or 0,
+      v21_stats.chord_reject or 0))
     player.print(string.format(
       "    cache hits=%d misses=%d",
       v21_stats.cache_hits or 0, v21_stats.cache_misses or 0))

@@ -932,29 +932,66 @@ function M.compute(points, reaches, opts)
   -- v21 conflict-check counters.
   local edge_isect_calls = 0   -- # of bucket_any_intersect calls during accept
   local edge_isect_reject = 0  -- # of candidates rejected by intersection
+  local chord_reject = 0       -- # of candidates rejected by chord check
 
-  -- Add a parl's chain segments to the edge bucket. Called when a parl is
-  -- accepted (primary or expansion); subsequent candidates' chain segments
-  -- are intersection-checked against these.
+  -- pole_parls[pole_idx] = { [parl_id] = true, ... }
+  -- Records which accepted parls each pole sits on the boundary of (corner
+  -- or chain intermediate). Used by the chord check below to detect new
+  -- chain segments that lie inside an existing parl's interior.
+  local pole_parls = {}
+  local next_parl_id = 0
+
+  -- Add a parl's chain segments to the edge bucket AND register every
+  -- chain pole (corners + intermediates) under a fresh parl_id so future
+  -- candidates can chord-check against it.
   local function add_parl_edges(P)
+    next_parl_id = next_parl_id + 1
+    local pid = next_parl_id
     for _, ch in ipairs(P.chains) do
       for ci = 1, #ch - 1 do
         add_edge_unchecked(ch[ci], ch[ci + 1])
       end
+      for ki = 1, #ch do
+        local p = ch[ki]
+        local set = pole_parls[p]
+        if not set then set = {}; pole_parls[p] = set end
+        set[pid] = true
+      end
     end
   end
 
-  -- Returns true iff any chain segment of P transversally crosses an edge
-  -- already in edge_bucket. Boundary touch (endpoint-shared, collinear)
-  -- doesn't count as a crossing — segs_intersect handles that. Equivalent
-  -- to v20's SAT non-overlap with containment override:
-  --   * containment (Q inside P, or P inside Q): no edge crosses → pass
-  --   * shared side / shared corner: endpoint exclusion → pass
-  --   * partial overlap (boundary cross): transversal intersection → reject
+  -- True iff a and b sit on the boundary of some same accepted parl Q
+  -- (= both registered under the same parl_id in pole_parls).
+  local function shares_accepted_parl(a, b)
+    local pa = pole_parls[a]
+    if not pa then return false end
+    local pb = pole_parls[b]
+    if not pb then return false end
+    for q in pairs(pa) do
+      if pb[q] then return true end
+    end
+    return false
+  end
+
+  -- Conflict check: returns true iff any chain segment of P should reject
+  -- the candidate. Two independent reasons:
+  --   1. CHORD — segment connects two boundary points of some existing Q
+  --      and isn't a known chain edge. Such a segment lies inside Q's
+  --      convex hull (interior), which SAT's non-overlap rule rejects.
+  --   2. TRANSVERSAL — segment crosses an existing edge at a non-endpoint.
+  -- Together (1) + (2) = SAT non-overlap with containment override:
+  --   * containment (Q ⊂ P or P ⊂ Q): no chord, no transversal → pass
+  --   * shared side / shared corner: edge_set has it / endpoint excl → pass
+  --   * partial overlap with boundary cross: transversal → reject
+  --   * partial overlap via chord (e.g., diagonal of Q): chord → reject
   local function parl_chains_intersect_existing(P)
     for _, ch in ipairs(P.chains) do
       for ci = 1, #ch - 1 do
         local a, b = ch[ci], ch[ci + 1]
+        if not edge_set[edge_key(a, b)] and shares_accepted_parl(a, b) then
+          chord_reject = chord_reject + 1
+          return true
+        end
         local pa, pb = points[a], points[b]
         edge_isect_calls = edge_isect_calls + 1
         if bucket_any_intersect(pa.x, pa.y, pb.x, pb.y) then
@@ -1026,6 +1063,7 @@ function M.compute(points, reaches, opts)
   stats.p2_y_lookups = p2_y_lookups
   stats.edge_isect_calls = edge_isect_calls
   stats.edge_isect_reject = edge_isect_reject
+  stats.chord_reject = chord_reject
 
   for _, P in ipairs(primary_parls) do
     accepted_parls[#accepted_parls + 1] = P
