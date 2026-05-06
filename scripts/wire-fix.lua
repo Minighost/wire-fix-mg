@@ -1,4 +1,5 @@
-local algo_v21 = require("scripts.algo-v21")
+local algo = require("scripts.algo")
+local uf = require("scripts.algo_unionfind")
 
 local M = {}
 
@@ -18,7 +19,7 @@ end
 
 local function get_settings(player)
   local s = settings.get_player_settings(player)
-  local max_grid = tonumber(s["wire-fix-max-grid"].value) or 32
+  local max_grid = tonumber(s["wire-fix-max-grid"].value) or 128
   local include_ghosts = s["wire-fix-include-ghosts"].value
   return include_ghosts, max_grid
 end
@@ -35,18 +36,8 @@ local function pole_proto(e)
   return e.prototype
 end
 
-local function uf_find(uf, i)
-  while uf[i] ~= i do
-    uf[i] = uf[uf[i]]
-    i = uf[i]
-  end
-  return i
-end
-
-local function uf_union(uf, a, b)
-  local ra, rb = uf_find(uf, a), uf_find(uf, b)
-  if ra ~= rb then uf[ra] = rb end
-end
+local uf_find = uf.find
+local uf_union = uf.union
 
 -- Sort by (x, y) so identical layouts produce identical results regardless
 -- of pole creation order / unit_number.
@@ -142,7 +133,7 @@ function M.run(player_index, entities, opts)
     points[i] = { x = p.position.x, y = p.position.y }
     reaches[i] = pole_proto(p).get_max_wire_distance(p.quality)
   end
-  local v21_edges, v21_parls, v21_iso, v21_stats = algo_v21.compute(points, reaches, {
+  local v21_edges, v21_parls, v21_iso, v21_stats = algo.compute(points, reaches, {
     skip_chain_block = config.measure_skip_chain,
     max_grid = max_grid,
   })

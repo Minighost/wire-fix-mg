@@ -29,84 +29,30 @@
 -- Public API (same contract as algo-v20):
 --   M.compute(points, reaches, opts) -> edges, parls, iso_tris, stats
 
+local geom = require("scripts.algo_geometry")
+local keys = require("scripts.algo_keys")
+
 local M = {}
 
-local EPS = 1e-9
+local EPS = geom.EPS
+local ROUND_SCALE = geom.ROUND_SCALE
+local vec_round_xy = geom.vec_round_xy
+local cross_2d = geom.cross_2d
+local dist = geom.dist
+local segs_intersect = geom.segs_intersect
+
+local DEFAULT_MAX_GRID = keys.DEFAULT_MAX_GRID
+local build_scales = keys.build_scales
+local edge_key = keys.edge_key
+local tri_key = keys.tri_key
+local quad_key = keys.quad_key
+
 local EPS_GEOM = 1e-6
 local EPS_DIAG = 1e-6
-local ROUND_SCALE = 10000
-
-local DEFAULT_MAX_GRID = 32
-local function build_scales(max_grid)
-  local scales = {}
-  local s = 32
-  while s <= max_grid do
-    scales[#scales + 1] = s
-    s = s * 2
-  end
-  if #scales == 0 then scales[1] = 32 end
-  return scales
-end
 local SQRT3_2 = 0.86602540378443864676  -- √3/2, phase 2 lens β bound coefficient
 local mfloor = math.floor
 local mabs = math.abs
 local msqrt = math.sqrt
-
-local function vec_round_xy(x, y)
-  local rx
-  if x >= 0 then rx = mfloor(x * ROUND_SCALE + 0.5)
-  else rx = -mfloor(-x * ROUND_SCALE + 0.5)
-  end
-  local ry
-  if y >= 0 then ry = mfloor(y * ROUND_SCALE + 0.5)
-  else ry = -mfloor(-y * ROUND_SCALE + 0.5)
-  end
-  return rx, ry
-end
-
-local function cross_2d(ax, ay, bx, by)
-  return ax * by - ay * bx
-end
-
-local function dist(ax, ay, bx, by)
-  local dx = ax - bx
-  local dy = ay - by
-  return msqrt(dx * dx + dy * dy)
-end
-
-local function edge_key(i, j)
-  if i < j then return i .. "_" .. j
-  else return j .. "_" .. i
-  end
-end
-
-local function tri_key(a, b, c)
-  local s = { a, b, c }
-  table.sort(s)
-  return s[1] .. "_" .. s[2] .. "_" .. s[3]
-end
-
-local function quad_key(corners)
-  local s = { corners[1], corners[2], corners[3], corners[4] }
-  table.sort(s)
-  return s[1] .. "_" .. s[2] .. "_" .. s[3] .. "_" .. s[4]
-end
-
-local function segs_intersect(p1x, p1y, p2x, p2y, p3x, p3y, p4x, p4y)
-  if (p1x == p3x and p1y == p3y) or (p1x == p4x and p1y == p4y)
-     or (p2x == p3x and p2y == p3y) or (p2x == p4x and p2y == p4y) then
-    return false
-  end
-  local d1 = (p4x - p3x) * (p1y - p3y) - (p4y - p3y) * (p1x - p3x)
-  local d2 = (p4x - p3x) * (p2y - p3y) - (p4y - p3y) * (p2x - p3x)
-  local d3 = (p2x - p1x) * (p3y - p1y) - (p2y - p1y) * (p3x - p1x)
-  local d4 = (p2x - p1x) * (p4y - p1y) - (p2y - p1y) * (p4x - p1x)
-  if ((d1 > EPS and d2 < -EPS) or (d1 < -EPS and d2 > EPS)) and
-     ((d3 > EPS and d4 < -EPS) or (d3 < -EPS and d4 > EPS)) then
-    return true
-  end
-  return false
-end
 
 function M.compute(points, reaches, opts)
   opts = opts or {}

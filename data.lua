@@ -17,7 +17,7 @@ data:extend{
       {"wire-fix.bullet", {"wire-fix.shift-left-click"}},
       "\n",
       {"wire-fix.bullet", {"wire-fix.right-click"}},
-      "\n\n",
+      "\n",
       {"wire-fix.tip-large-grid"},
     },
     select = {
@@ -27,7 +27,7 @@ data:extend{
       entity_type_filters = {"electric-pole", "entity-ghost"},
     },
     alt_select = {
-      border_color = {49, 138, 206},
+      border_color = {0.3, 0.8, 1},
       cursor_box_type = "copy",
       mode = {"any-entity"},
       entity_type_filters = {"electric-pole", "entity-ghost"},
@@ -37,6 +37,11 @@ data:extend{
       cursor_box_type = "not-allowed",
       mode = {"any-entity"},
       entity_type_filters = {"electric-pole", "entity-ghost"},
+    },
+    alt_reverse_select = {
+      border_color = {0, 0, 0, 0},
+      cursor_box_type = "not-allowed",
+      mode = {"nothing"},
     },
   },
   {
