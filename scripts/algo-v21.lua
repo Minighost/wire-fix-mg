@@ -927,6 +927,10 @@ function M.compute(points, reaches, opts)
                               candidates[#candidates + 1] = c2
                             end
                           end
+                          -- Smallest-first per line: stop after the first
+                          -- in-lens X. Cascade expansion fills further-out
+                          -- parls of the same shape.
+                          break
                         end
                       end
                     end
@@ -1000,6 +1004,7 @@ function M.compute(points, reaches, opts)
                               candidates[#candidates + 1] = c3
                             end
                           end
+                          break  -- smallest-first per line (see phase 2)
                         end
                       end
                     end
@@ -1091,6 +1096,7 @@ function M.compute(points, reaches, opts)
                               candidates[#candidates + 1] = c4
                             end
                           end
+                          break  -- smallest-first per line (see phase 2)
                         end
                       end
                     end
