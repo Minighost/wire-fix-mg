@@ -269,6 +269,21 @@ function M.compute(points, reaches, opts)
     end
   end
 
+  -- Phase 3 (xy-mirror of phase 2): vertical-edge anchor + lens of slanted
+  -- third corner. vert_line_of[p] = ndx=0, ndy=1 line (canonicalized).
+  local vert_line_of = {}
+  do
+    local row_a = lines[0]
+    local row_b = row_a and row_a[1]
+    if row_b then
+      for _, line in pairs(row_b) do
+        for ki = 1, #line.poles do
+          vert_line_of[line.poles[ki]] = line
+        end
+      end
+    end
+  end
+
   stats.t_setup.stop()
 
   local pos_seg_count = 0
@@ -624,6 +639,58 @@ function M.compute(points, reaches, opts)
     }
   end
 
+  -- v21 phase 3: build a candidate slanted parl from a vertical left edge
+  -- (P, Q) and a third corner X. The 4th corner Y sits at (X.x, X.y + L');
+  -- direct lookup via pos_to_idx. Caller has already lens-validated X.
+  local function build_phase3_candidate(P, Q, X)
+    local rx_Y = pixs[X]
+    local ry_Y = piys[X] + (piys[Q] - piys[P])
+    local row = pos_to_idx[rx_Y]
+    local Y = row and row[ry_Y]
+    if not Y or pole_dead[Y] or Y == P or Y == Q or Y == X then return nil end
+
+    -- CCW: P (TL) → X (TR) → Y (BR) → Q (BL).
+    --   v_a = X-P = (αx, βy)      with αx > 0  (lens guarantees αx ≥ L'·√3/2)
+    --   v_b = Q-P = (0, L')       with L' > 0
+    --   cross_2d(v_a, v_b) = αx · L' > 0  ✓
+    local cc1, cc2, cc3, cc4 = P, X, Y, Q
+
+    chain_calls = chain_calls + 1
+    local ch1 = make_chain(cc1, cc2); if ch1 == nil then return nil end
+    chain_success = chain_success + 1
+    chain_calls = chain_calls + 1
+    local ch2 = make_chain(cc2, cc3); if ch2 == nil then return nil end
+    chain_success = chain_success + 1
+    chain_calls = chain_calls + 1
+    local ch3 = make_chain(cc3, cc4); if ch3 == nil then return nil end
+    chain_success = chain_success + 1
+    chain_calls = chain_calls + 1
+    local ch4 = make_chain(cc4, cc1); if ch4 == nil then return nil end
+    chain_success = chain_success + 1
+
+    local x1, x2, x3, x4 = pxs[cc1], pxs[cc2], pxs[cc3], pxs[cc4]
+    local y1, y2, y3, y4 = pys[cc1], pys[cc2], pys[cc3], pys[cc4]
+    local va_x = x2 - x1
+    local va_y = y2 - y1
+    local vb_x = x4 - x1
+    local vb_y = y4 - y1
+    local bxmin, bxmax = x1, x1
+    if x2 < bxmin then bxmin = x2 end; if x2 > bxmax then bxmax = x2 end
+    if x3 < bxmin then bxmin = x3 end; if x3 > bxmax then bxmax = x3 end
+    if x4 < bxmin then bxmin = x4 end; if x4 > bxmax then bxmax = x4 end
+    local bymin, bymax = y1, y1
+    if y2 < bymin then bymin = y2 end; if y2 > bymax then bymax = y2 end
+    if y3 < bymin then bymin = y3 end; if y3 > bymax then bymax = y3 end
+    if y4 < bymin then bymin = y4 end; if y4 > bymax then bymax = y4 end
+    return {
+      corners = { cc1, cc2, cc3, cc4 },
+      chains = { ch1, ch2, ch3, ch4 },
+      area = mabs(cross_2d(va_x, va_y, vb_x, vb_y)),
+      bxmin = bxmin, bxmax = bxmax,
+      bymin = bymin, bymax = bymax,
+    }
+  end
+
   -- Phase classification (matches v20). 0 = axis-rect, 1 = horiz-aligned,
   -- 2 = vert-aligned, 3 = diagonal. Drives phase-priority dispatch.
   local function parl_phase(P)
@@ -652,14 +719,17 @@ function M.compute(points, reaches, opts)
   local p2_lens_pass = 0    -- # of X poles that passed precise lens bounds
   local p2_y_lookups = 0    -- # of pos_to_idx Y lookups (lens-pass triggers one)
 
-  -- v21 phase 1+2 enumerate. For each alive pole P with a horizontal line,
-  -- walk Q east; at each (P, Q):
-  --   * phase 1: smallest axis-rect anchored on (P, Q)
-  --   * phase 2: every alive X in the (P, Q) lens region |α| ≤ L/2 ∧ β ≥ L·√3/2
-  -- Candidates are filtered to bbox > prev_scale so a larger scale only emits
-  -- parls that didn't fit a smaller scale (= step 12 of the v21 spec).
+  -- v21 phase 1+2+3 enumerate. Per scale:
+  --   * horizontal anchor (phase 1 axis-rect + phase 2 horiz-aligned slanted)
+  --   * vertical anchor (phase 3 vert-aligned slanted; axis-rect already
+  --     covered by phase 1's horizontal-anchor sweep, so phase 3 only emits
+  --     non-axis-rect slanted parls)
+  -- Candidates are filtered to bbox > prev_scale so a larger scale only
+  -- emits parls that didn't fit a smaller scale (= step 12 of the v21 spec).
   local function enumerate_for_scale(scale, prev_scale)
     local candidates = {}
+
+    -- Horizontal anchor sweep (phase 1 + 2).
     for P = 1, n do
       if not pole_dead[P] then
         local hline = horiz_line_of[P]
@@ -741,6 +811,75 @@ function M.compute(points, reaches, opts)
         end
       end
     end
+
+    -- Vertical anchor sweep (phase 3 only — slanted with vertical left edge).
+    -- xy-mirror of phase 2: chain walk goes south (Q below P, ry > P's ry),
+    -- lens region is to the right of P (αx ≥ L'·√3/2) with |βy| ≤ L'/2.
+    for P = 1, n do
+      if not pole_dead[P] then
+        local vline = vert_line_of[P]
+        if vline then
+          local poles_in_line = vline.poles
+          local pos_in_v = vline.pos_in_line[P]
+          local px_P = pxs[P]
+          local py_P = pys[P]
+          for q_idx = pos_in_v + 1, #poles_in_line do
+            local Q = poles_in_line[q_idx]
+            if pole_dead[Q] then break end
+            local Lp = pys[Q] - py_P
+            if Lp > scale then break end
+            pair_checks = pair_checks + 1
+
+            local half_Lp = Lp * 0.5
+            local lens_x_min = px_P + Lp * SQRT3_2
+            local lens_x_max = px_P + scale
+            local lens_y_min = py_P - half_Lp
+            local lens_y_max = py_P + half_Lp
+            if lens_x_min <= lens_x_max then
+              local cx_min = mfloor(lens_x_min / cell_size)
+              local cx_max = mfloor(lens_x_max / cell_size)
+              local cy_min = mfloor(lens_y_min / cell_size)
+              local cy_max = mfloor(lens_y_max / cell_size)
+              for cx = cx_min, cx_max do
+                local row_p = point_bucket[cx]
+                if row_p then
+                  for cy = cy_min, cy_max do
+                    local cell = row_p[cy]
+                    if cell then
+                      for ki = 1, #cell do
+                        local X = cell[ki]
+                        if not pole_dead[X] and X ~= P and X ~= Q then
+                          p2_x_checks = p2_x_checks + 1
+                          local x_X = pxs[X]
+                          local y_X = pys[X]
+                          local off_x = x_X - px_P  -- = α
+                          local off_y = y_X - py_P  -- = β
+                          if off_x >= Lp * SQRT3_2 - EPS_GEOM
+                             and off_x <= scale + EPS_GEOM
+                             and mabs(off_y) <= half_Lp + EPS_GEOM then
+                            p2_lens_pass = p2_lens_pass + 1
+                            p2_y_lookups = p2_y_lookups + 1
+                            local c3 = build_phase3_candidate(P, Q, X)
+                            if c3 then
+                              local w = c3.bxmax - c3.bxmin
+                              local h = c3.bymax - c3.bymin
+                              if w > prev_scale or h > prev_scale then
+                                candidates[#candidates + 1] = c3
+                              end
+                            end
+                          end
+                        end
+                      end
+                    end
+                  end
+                end
+              end
+            end
+          end
+        end
+      end
+    end
+
     return candidates
   end
 
