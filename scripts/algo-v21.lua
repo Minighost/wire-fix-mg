@@ -36,7 +36,17 @@ local EPS_GEOM = 1e-6
 local EPS_DIAG = 1e-6
 local ROUND_SCALE = 10000
 
-local SCALES = { 32, 64, 128, 256 }
+local DEFAULT_MAX_GRID = 32
+local function build_scales(max_grid)
+  local scales = {}
+  local s = 32
+  while s <= max_grid do
+    scales[#scales + 1] = s
+    s = s * 2
+  end
+  if #scales == 0 then scales[1] = 32 end
+  return scales
+end
 local SQRT3_2 = 0.86602540378443864676  -- √3/2, phase 2 lens β bound coefficient
 local mfloor = math.floor
 local mabs = math.abs
@@ -99,9 +109,12 @@ local function segs_intersect(p1x, p1y, p2x, p2y, p3x, p3y, p4x, p4y)
 end
 
 function M.compute(points, reaches, opts)
+  opts = opts or {}
   local n = #points
   local stats = {}
   if n < 2 then return {}, {}, {}, stats end
+
+  local SCALES = build_scales(opts.max_grid or DEFAULT_MAX_GRID)
 
   local pxs, pys = {}, {}
   for i = 1, n do
@@ -1312,7 +1325,13 @@ function M.compute(points, reaches, opts)
       phases[ph][#phases[ph] + 1] = P
     end
     for ph = 1, 4 do
-      table.sort(phases[ph], function(a, b) return a.area < b.area end)
+      for _, P in ipairs(phases[ph]) do
+        if not P._sort_key then P._sort_key = quad_key(P.corners) end
+      end
+      table.sort(phases[ph], function(a, b)
+        if a.area ~= b.area then return a.area < b.area end
+        return a._sort_key < b._sort_key
+      end)
     end
 
     for ph = 1, 4 do
@@ -1429,7 +1448,14 @@ function M.compute(points, reaches, opts)
       end
     end
   end
-  table.sort(mst_candidates, function(a, b) return a.d < b.d end)
+  -- Tie-break by (i, j) — since wire-fix.lua sorts poles by (x, y),
+  -- equal-distance candidates resolve identically across runs of the
+  -- same layout, regardless of pole creation order / unit_number.
+  table.sort(mst_candidates, function(a, b)
+    if a.d ~= b.d then return a.d < b.d end
+    if a.i ~= b.i then return a.i < b.i end
+    return a.j < b.j
+  end)
   stats.mst_cand_count = #mst_candidates
   stats.t_mst_cand.stop()
 
