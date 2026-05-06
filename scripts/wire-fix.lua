@@ -178,8 +178,9 @@ function M.run(player_index, entities)
       v21_stats.edge_isect_calls or 0, v21_stats.edge_isect_reject or 0,
       v21_stats.chord_reject or 0))
     player.print(string.format(
-      "    cache hits=%d misses=%d",
-      v21_stats.cache_hits or 0, v21_stats.cache_misses or 0))
+      "    cache hits=%d misses=%d  chain_dead_reject=%d",
+      v21_stats.cache_hits or 0, v21_stats.cache_misses or 0,
+      v21_stats.chain_dead_reject or 0))
     player.print({"",
       "  pattern_edges=", v21_stats.t_pattern_edges,
       "  mst_cand=", v21_stats.t_mst_cand,

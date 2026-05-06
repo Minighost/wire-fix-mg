@@ -366,14 +366,37 @@ function M.compute(points, reaches, opts)
   end
 
   local chain_cache = {}
+  local chain_dead_reject = 0
 
+  -- Chains containing any dead pole are rejected. A dead pole sits strictly
+  -- inside an already-accepted parl, so a chain crossing it is going through
+  -- that parl's interior — both incorrect (chord overlap) and a perf-prune
+  -- since at large scales it kills the combinatorial blow-up of candidates
+  -- whose sides would have to wind through dead territory.
+  --
+  -- The cache stores positive results from earlier scales, but pole_dead
+  -- monotonically grows across scales — a chain that was clean at scale 32
+  -- may have dead intermediates by scale 256. So on every cache hit we
+  -- re-verify dead status; on the first violation we downgrade the cached
+  -- entry to false (since dead never goes back to alive within compute()).
   local function _make_chain_inner(lo, hi)
     local row = chain_cache[lo]
     if row then
       local cached = row[hi]
-      if cached ~= nil then
+      if cached == false then
         cache_hits = cache_hits + 1
-        if cached == false then return nil end
+        return nil
+      end
+      if cached ~= nil then
+        for ci = 1, #cached do
+          if pole_dead[cached[ci]] then
+            row[hi] = false
+            chain_dead_reject = chain_dead_reject + 1
+            cache_hits = cache_hits + 1
+            return nil
+          end
+        end
+        cache_hits = cache_hits + 1
         return cached
       end
     else
@@ -385,6 +408,14 @@ function M.compute(points, reaches, opts)
     local chain = { lo }
     for ki = 1, count do chain[#chain + 1] = pos_seg_ks[ki] end
     chain[#chain + 1] = hi
+
+    for ci = 1, #chain do
+      if pole_dead[chain[ci]] then
+        row[hi] = false
+        chain_dead_reject = chain_dead_reject + 1
+        return nil
+      end
+    end
 
     for ci = 1, #chain - 1 do
       local a = chain[ci]
@@ -550,18 +581,18 @@ function M.compute(points, reaches, opts)
     local Pp_idx, Qp_idx, ry_y2
     for k = pos_P + 1, #col_P do
       local cand = col_P[k]
-      if pole_dead[cand] then
-        -- dead poles inside the column don't break the search — just skip.
-      else
-        local cand_ry = piys[cand]
-        if (cand_ry - ry_P) > max_dy * ROUND_SCALE then break end
-        local q2 = row_at_Q[cand_ry]
-        if q2 and not pole_dead[q2] then
-          Pp_idx = cand
-          Qp_idx = q2
-          ry_y2 = cand_ry
-          break
-        end
+      -- Break (not skip) at dead column pole: any partner past dead would
+      -- need a chain through that dead pole, which make_chain now rejects
+      -- anyway. Stopping early avoids wasted candidate construction.
+      if pole_dead[cand] then break end
+      local cand_ry = piys[cand]
+      if (cand_ry - ry_P) > max_dy * ROUND_SCALE then break end
+      local q2 = row_at_Q[cand_ry]
+      if q2 and not pole_dead[q2] then
+        Pp_idx = cand
+        Qp_idx = q2
+        ry_y2 = cand_ry
+        break
       end
     end
     if not Pp_idx then return nil end
@@ -1418,6 +1449,7 @@ function M.compute(points, reaches, opts)
   stats.iso_refl_emit = iso_refl_emit
   stats.cache_hits = cache_hits
   stats.cache_misses = cache_misses
+  stats.chain_dead_reject = chain_dead_reject
 
   -- Parl chain edges are already in edge_bucket / edges (added by
   -- add_parl_edges during accept). Only iso reflection tris need adding,
