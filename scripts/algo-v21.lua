@@ -586,18 +586,24 @@ function M.compute(points, reaches, opts)
   -- v21 phase 1: build a candidate axis-rect from the (P, Q) bottom edge.
   -- Returns a candidate table (corners CCW, chains, area, bbox) or nil.
   -- Caller has already ensured P, Q are alive and on the same horizontal line.
-  local function build_axis_rect_candidate(P, Q, max_dy)
+  -- prev_scale: if L ≤ prev_scale, skip dy ≤ prev_scale partners — those
+  -- give bbox ≤ prev_scale, which a smaller scale already handled.
+  local function build_axis_rect_candidate(P, Q, max_dy, prev_scale)
     local rx_P = pixs[P]
     local ry_P = piys[P]
     local rx_Q = pixs[Q]
+    local L = pxs[Q] - pxs[P]
 
     -- Find smallest y2 (= ry above ry_P) such that (rx_P, y2) and (rx_Q, y2)
-    -- are both alive poles.
+    -- are both alive poles AND the resulting bbox > prev_scale.
     local col_P = cols_by_rx[rx_P]
     if not col_P then return nil end
     local pos_P = col_pos[P]
     local row_at_Q = pos_to_idx[rx_Q]
     if not row_at_Q then return nil end
+
+    local min_dy_fp = (L > prev_scale) and 0 or (prev_scale * ROUND_SCALE)
+    local max_dy_fp = max_dy * ROUND_SCALE
 
     local Pp_idx, Qp_idx, ry_y2
     for k = pos_P + 1, #col_P do
@@ -607,13 +613,16 @@ function M.compute(points, reaches, opts)
       -- anyway. Stopping early avoids wasted candidate construction.
       if pole_dead[cand] then break end
       local cand_ry = piys[cand]
-      if (cand_ry - ry_P) > max_dy * ROUND_SCALE then break end
-      local q2 = row_at_Q[cand_ry]
-      if q2 and not pole_dead[q2] then
-        Pp_idx = cand
-        Qp_idx = q2
-        ry_y2 = cand_ry
-        break
+      local dy_fp = cand_ry - ry_P
+      if dy_fp > max_dy_fp then break end
+      if dy_fp > min_dy_fp then
+        local q2 = row_at_Q[cand_ry]
+        if q2 and not pole_dead[q2] then
+          Pp_idx = cand
+          Qp_idx = q2
+          ry_y2 = cand_ry
+          break
+        end
       end
     end
     if not Pp_idx then return nil end
@@ -872,14 +881,12 @@ function M.compute(points, reaches, opts)
             if L > scale then break end
             pair_checks = pair_checks + 1
 
-            -- Phase 1: smallest axis-rect on (P, Q).
-            local c1 = build_axis_rect_candidate(P, Q, scale)
+            -- Phase 1: smallest axis-rect on (P, Q) within this scale's
+            -- band. build_axis_rect_candidate skips dy partners that would
+            -- give bbox ≤ prev_scale, so we don't need a post-filter here.
+            local c1 = build_axis_rect_candidate(P, Q, scale, prev_scale)
             if c1 then
-              local w = c1.bxmax - c1.bxmin
-              local h = c1.bymax - c1.bymin
-              if w > prev_scale or h > prev_scale then
-                candidates[#candidates + 1] = c1
-              end
+              candidates[#candidates + 1] = c1
             end
 
             -- Phase 2: line-based X enumeration. For each line through P
@@ -917,20 +924,18 @@ function M.compute(points, reaches, opts)
                         local off_x = pxs[X] - px_P
                         if mabs(off_x) <= half_L + EPS_GEOM
                            and off_y >= L_s32 - EPS_GEOM then
-                          p2_lens_pass = p2_lens_pass + 1
-                          p2_y_lookups = p2_y_lookups + 1
-                          local c2 = build_phase2_candidate(P, Q, X)
-                          if c2 then
-                            local w = c2.bxmax - c2.bxmin
-                            local h = c2.bymax - c2.bymin
-                            if w > prev_scale or h > prev_scale then
+                          -- Band pre-filter: bbox = (L+|off_x|, off_y).
+                          -- Skip lens-pass-but-bbox-too-small X, walk on.
+                          local abs_off_x = off_x >= 0 and off_x or -off_x
+                          if (L + abs_off_x) > prev_scale or off_y > prev_scale then
+                            p2_lens_pass = p2_lens_pass + 1
+                            p2_y_lookups = p2_y_lookups + 1
+                            local c2 = build_phase2_candidate(P, Q, X)
+                            if c2 then
                               candidates[#candidates + 1] = c2
                             end
+                            break  -- smallest band-first per line
                           end
-                          -- Smallest-first per line: stop after the first
-                          -- in-lens X. Cascade expansion fills further-out
-                          -- parls of the same shape.
-                          break
                         end
                       end
                     end
@@ -994,17 +999,17 @@ function M.compute(points, reaches, opts)
                         local off_y = pys[X] - py_P
                         if off_x >= Lp_s32 - EPS_GEOM
                            and mabs(off_y) <= half_Lp + EPS_GEOM then
-                          p2_lens_pass = p2_lens_pass + 1
-                          p2_y_lookups = p2_y_lookups + 1
-                          local c3 = build_phase3_candidate(P, Q, X)
-                          if c3 then
-                            local w = c3.bxmax - c3.bxmin
-                            local h = c3.bymax - c3.bymin
-                            if w > prev_scale or h > prev_scale then
+                          -- Band pre-filter: bbox = (off_x, Lp+|off_y|).
+                          local abs_off_y = off_y >= 0 and off_y or -off_y
+                          if off_x > prev_scale or (Lp + abs_off_y) > prev_scale then
+                            p2_lens_pass = p2_lens_pass + 1
+                            p2_y_lookups = p2_y_lookups + 1
+                            local c3 = build_phase3_candidate(P, Q, X)
+                            if c3 then
                               candidates[#candidates + 1] = c3
                             end
+                            break  -- smallest band-first per line
                           end
-                          break  -- smallest-first per line (see phase 2)
                         end
                       end
                     end
@@ -1074,6 +1079,8 @@ function M.compute(points, reaches, opts)
                     else
                       k_start = pos_P - 1; k_end = 1;       k_step = -1
                     end
+                    local abs_dx_PQ = dx_PQ >= 0 and dx_PQ or -dx_PQ
+                    local abs_dy_PQ = dy_PQ >= 0 and dy_PQ or -dy_PQ
                     for k = k_start, k_end, k_step do
                       local X = poles[k]
                       if pole_dead[X] then break end
@@ -1086,17 +1093,21 @@ function M.compute(points, reaches, opts)
                         local alpha = vx * dx + vy * dy
                         if mabs(alpha) <= half_L + EPS_GEOM
                            and beta >= L_s32 - EPS_GEOM then
-                          p2_lens_pass = p2_lens_pass + 1
-                          p2_y_lookups = p2_y_lookups + 1
-                          local c4 = build_phase4_candidate(P, Q, X)
-                          if c4 then
-                            local w = c4.bxmax - c4.bxmin
-                            local h = c4.bymax - c4.bymin
-                            if w > prev_scale or h > prev_scale then
+                          -- Band pre-filter: xy bbox extents are
+                          -- (|dx_PQ|+|vx|, |dy_PQ|+|vy|) for any parl
+                          -- (P, Q, X, Y=X+(Q-P)).
+                          local abs_vx = vx >= 0 and vx or -vx
+                          local abs_vy = vy >= 0 and vy or -vy
+                          if (abs_dx_PQ + abs_vx) > prev_scale
+                             or (abs_dy_PQ + abs_vy) > prev_scale then
+                            p2_lens_pass = p2_lens_pass + 1
+                            p2_y_lookups = p2_y_lookups + 1
+                            local c4 = build_phase4_candidate(P, Q, X)
+                            if c4 then
                               candidates[#candidates + 1] = c4
                             end
+                            break  -- smallest band-first per line
                           end
-                          break  -- smallest-first per line (see phase 2)
                         end
                       end
                     end
