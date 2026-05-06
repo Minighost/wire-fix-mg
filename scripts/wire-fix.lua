@@ -1,4 +1,4 @@
-local algo_v20 = require("scripts.algo-v20")
+local algo_v21 = require("scripts.algo-v21")
 
 local M = {}
 
@@ -74,11 +74,12 @@ function M.run(player_index, entities)
   end
   p_phase1.stop()
 
-  -- Phase 2: pattern-aware layout (algo v20).
-  -- NOTE: the per-user "max connections per pole" setting is NOT honored in
-  -- v0.2 — v20 may produce more wires per pole than v0.1.0. Re-introducing
-  -- the cap is tracked for a follow-up.
-  local p_v20 = game.create_profiler()
+  -- Phase 2: pattern-aware layout (algo v21 phase 1 prototype).
+  -- v21 phase 1 covers ONLY axis-rect parallelograms; non-axis-rect patterns
+  -- are not detected here and fall through to the MST closure step. Diff
+  -- vs v20 (axis-rect-dominant lattices) and measurement is the goal of
+  -- this snapshot.
+  local p_v21 = game.create_profiler()
   local points = {}
   local reaches = {}
   for i = 1, n do
@@ -86,14 +87,14 @@ function M.run(player_index, entities)
     points[i] = { x = p.position.x, y = p.position.y }
     reaches[i] = p.prototype.get_max_wire_distance(p.quality)
   end
-  local v20_edges, v20_parls, v20_iso, v20_stats = algo_v20.compute(points, reaches, {
+  local v21_edges, v21_parls, v21_iso, v21_stats = algo_v21.compute(points, reaches, {
     skip_chain_block = config.measure_skip_chain,
   })
-  p_v20.stop()
+  p_v21.stop()
 
   -- Phase 3: build wanted set keyed by pair_key(unit_number).
   local wanted = {}
-  for _, edge in ipairs(v20_edges) do
+  for _, edge in ipairs(v21_edges) do
     local pa, pb = poles[edge[1]], poles[edge[2]]
     wanted[pair_key(pa.unit_number, pb.unit_number)] = { pa, pb }
   end
@@ -132,26 +133,26 @@ function M.run(player_index, entities)
   p_diff.stop()
   p_total.stop()
 
-  notify(player, "wire-fix.done", n, #v20_edges)
+  notify(player, "wire-fix.done", n, #v21_edges)
 
   if config.dev_mode then
     local internal_count = 0
     for _ in pairs(internal_pairs) do internal_count = internal_count + 1 end
-    player.print({"", "[Wire Fix v0.2/v20] total: ", p_total})
+    player.print({"", "[Wire Fix v0.2/v21 phase1] total: ", p_total})
     player.print(string.format(
       "  poles=%d  internal_existing=%d  edges_wanted=%d  candidates=%d  primary=%d  expansion=%d  iso=%d  mst_cand=%d  api: disconnect=%d connect=%d",
-      n, internal_count, #v20_edges,
-      v20_stats.candidates or 0, v20_stats.primary or 0, v20_stats.expansion or 0,
-      #v20_iso, v20_stats.mst_cand_count or 0,
+      n, internal_count, #v21_edges,
+      v21_stats.candidates or 0, v21_stats.primary or 0, v21_stats.expansion or 0,
+      #v21_iso, v21_stats.mst_cand_count or 0,
       disconnect_calls, connect_calls))
-    player.print({"", "  phase1=", p_phase1, "  v20=", p_v20, "  diff=", p_diff})
+    player.print({"", "  phase1=", p_phase1, "  v21=", p_v21, "  diff=", p_diff})
     player.print({"",
-      "  setup=", v20_stats.t_setup,
-      "  scale_total=", v20_stats.t_scale_total,
-      "  iso=", v20_stats.t_iso})
-    if v20_stats.scale_candidates then
-      local sc = v20_stats.scale_candidates
-      local sd = v20_stats.scale_dead_after
+      "  setup=", v21_stats.t_setup,
+      "  scale_total=", v21_stats.t_scale_total,
+      "  iso=", v21_stats.t_iso})
+    if v21_stats.scale_candidates then
+      local sc = v21_stats.scale_candidates
+      local sd = v21_stats.scale_dead_after
       player.print(string.format(
         "    per-scale candidates: 32=%d 64=%d 128=%d 256=%d  dead_after: 32=%d 64=%d 128=%d 256=%d",
         sc[1] or 0, sc[2] or 0, sc[3] or 0, sc[4] or 0,
@@ -159,17 +160,25 @@ function M.run(player_index, entities)
     end
     player.print(string.format(
       "    pair_checks=%d  angle_pass=%d  iso_pass=%d  iso_refl=%d  chain_calls=%d  chain_success=%d  dead=%d",
-      v20_stats.pair_checks or 0, v20_stats.angle_pass or 0,
-      v20_stats.iso_pass or 0, v20_stats.iso_refl_emit or 0,
-      v20_stats.chain_calls or 0, v20_stats.chain_success or 0,
-      v20_stats.dead_count or 0))
+      v21_stats.pair_checks or 0, v21_stats.angle_pass or 0,
+      v21_stats.iso_pass or 0, v21_stats.iso_refl_emit or 0,
+      v21_stats.chain_calls or 0, v21_stats.chain_success or 0,
+      v21_stats.dead_count or 0))
+    player.print(string.format(
+      "    p2 x_checks=%d  lens_pass=%d  y_lookups=%d",
+      v21_stats.p2_x_checks or 0, v21_stats.p2_lens_pass or 0,
+      v21_stats.p2_y_lookups or 0))
+    player.print(string.format(
+      "    edge_isect calls=%d reject=%d  chord_reject=%d",
+      v21_stats.edge_isect_calls or 0, v21_stats.edge_isect_reject or 0,
+      v21_stats.chord_reject or 0))
     player.print(string.format(
       "    cache hits=%d misses=%d",
-      v20_stats.cache_hits or 0, v20_stats.cache_misses or 0))
+      v21_stats.cache_hits or 0, v21_stats.cache_misses or 0))
     player.print({"",
-      "  pattern_edges=", v20_stats.t_pattern_edges,
-      "  mst_cand=", v20_stats.t_mst_cand,
-      "  mst_closure=", v20_stats.t_mst_closure})
+      "  pattern_edges=", v21_stats.t_pattern_edges,
+      "  mst_cand=", v21_stats.t_mst_cand,
+      "  mst_closure=", v21_stats.t_mst_closure})
   end
 end
 
