@@ -37,6 +37,7 @@ local EPS_DIAG = 1e-6
 local ROUND_SCALE = 10000
 
 local SCALES = { 32, 64, 128, 256 }
+local SQRT3_2 = 0.86602540378443864676  -- √3/2, phase 2 lens β bound coefficient
 local mfloor = math.floor
 local mabs = math.abs
 local msqrt = math.sqrt
@@ -652,9 +653,93 @@ function M.compute(points, reaches, opts)
     }
   end
 
-  -- v21 phase 1 enumerate. For each alive pole P with a horizontal line,
-  -- walk Q east on that line; at each step build the smallest axis-rect.
-  local function enumerate_axis_rects_phase1(scale)
+  -- v21 phase 2: build a candidate slanted parl from a horizontal bottom
+  -- (P, Q) and a third corner X. The 4th corner Y sits at (X.x + L, X.y);
+  -- direct lookup via pos_to_idx. Caller has already lens-validated X.
+  local function build_phase2_candidate(P, Q, X)
+    local rx_Y = pixs[X] + (pixs[Q] - pixs[P])
+    local ry_Y = piys[X]
+    local row = pos_to_idx[rx_Y]
+    local Y = row and row[ry_Y]
+    if not Y or pole_dead[Y] or Y == P or Y == Q or Y == X then return nil end
+
+    -- CCW: P (BL) → Q (BR) → Y (TR) → X (TL).
+    --   v_a = Q-P = (L, 0)        with L > 0
+    --   v_b = X-P = (αx, βy)      with βy > 0  (lens guarantees βy ≥ L·√3/2)
+    --   cross_2d(v_a, v_b) = L·βy > 0  ✓
+    local cc1, cc2, cc3, cc4 = P, Q, Y, X
+
+    chain_calls = chain_calls + 1
+    local ch1 = make_chain(cc1, cc2); if ch1 == nil then return nil end
+    chain_success = chain_success + 1
+    chain_calls = chain_calls + 1
+    local ch2 = make_chain(cc2, cc3); if ch2 == nil then return nil end
+    chain_success = chain_success + 1
+    chain_calls = chain_calls + 1
+    local ch3 = make_chain(cc3, cc4); if ch3 == nil then return nil end
+    chain_success = chain_success + 1
+    chain_calls = chain_calls + 1
+    local ch4 = make_chain(cc4, cc1); if ch4 == nil then return nil end
+    chain_success = chain_success + 1
+
+    local x1, x2, x3, x4 = pxs[cc1], pxs[cc2], pxs[cc3], pxs[cc4]
+    local y1, y2, y3, y4 = pys[cc1], pys[cc2], pys[cc3], pys[cc4]
+    local va_x = x2 - x1
+    local va_y = y2 - y1
+    local vb_x = x4 - x1
+    local vb_y = y4 - y1
+    local bxmin, bxmax = x1, x1
+    if x2 < bxmin then bxmin = x2 end; if x2 > bxmax then bxmax = x2 end
+    if x3 < bxmin then bxmin = x3 end; if x3 > bxmax then bxmax = x3 end
+    if x4 < bxmin then bxmin = x4 end; if x4 > bxmax then bxmax = x4 end
+    local bymin, bymax = y1, y1
+    if y2 < bymin then bymin = y2 end; if y2 > bymax then bymax = y2 end
+    if y3 < bymin then bymin = y3 end; if y3 > bymax then bymax = y3 end
+    if y4 < bymin then bymin = y4 end; if y4 > bymax then bymax = y4 end
+    return {
+      corners = { cc1, cc2, cc3, cc4 },
+      chains = { ch1, ch2, ch3, ch4 },
+      area = mabs(cross_2d(va_x, va_y, vb_x, vb_y)),
+      bxmin = bxmin, bxmax = bxmax,
+      bymin = bymin, bymax = bymax,
+    }
+  end
+
+  -- Phase classification (matches v20). 0 = axis-rect, 1 = horiz-aligned,
+  -- 2 = vert-aligned, 3 = diagonal. Drives phase-priority dispatch.
+  local function parl_phase(P)
+    local p1 = points[P.corners[1]]
+    local p2 = points[P.corners[2]]
+    local p4 = points[P.corners[4]]
+    local v_a_x = p2.x - p1.x
+    local v_a_y = p2.y - p1.y
+    local v_b_x = p4.x - p1.x
+    local v_b_y = p4.y - p1.y
+    local eps = 1e-6
+    local a_horiz = mabs(v_a_y) < eps
+    local a_vert  = mabs(v_a_x) < eps
+    local b_horiz = mabs(v_b_y) < eps
+    local b_vert  = mabs(v_b_x) < eps
+    local has_horiz = a_horiz or b_horiz
+    local has_vert  = a_vert  or b_vert
+    if has_horiz and has_vert then return 0 end
+    if has_horiz then return 1 end
+    if has_vert  then return 2 end
+    return 3
+  end
+
+  -- Counters for v21 phase 2 instrumentation.
+  local p2_x_checks = 0     -- # of X poles in lens region considered
+  local p2_lens_pass = 0    -- # of X poles that passed precise lens bounds
+  local p2_y_lookups = 0    -- # of pos_to_idx Y lookups (lens-pass triggers one)
+
+  -- v21 phase 1+2 enumerate. For each alive pole P with a horizontal line,
+  -- walk Q east; at each (P, Q):
+  --   * phase 1: smallest axis-rect anchored on (P, Q)
+  --   * phase 2: every alive X in the (P, Q) lens region |α| ≤ L/2 ∧ β ≥ L·√3/2
+  -- Candidates are filtered to bbox > prev_scale so a larger scale only emits
+  -- parls that didn't fit a smaller scale (= step 12 of the v21 spec).
+  local function enumerate_for_scale(scale, prev_scale)
     local candidates = {}
     for P = 1, n do
       if not pole_dead[P] then
@@ -663,18 +748,75 @@ function M.compute(points, reaches, opts)
           local poles_in_line = hline.poles
           local pos_in_h = hline.pos_in_line[P]
           local px_P = pxs[P]
+          local py_P = pys[P]
           for q_idx = pos_in_h + 1, #poles_in_line do
             local Q = poles_in_line[q_idx]
             if pole_dead[Q] then
-              -- horizontal chain breaks at first dead pole going east.
+              -- horizontal chain breaks at the first dead pole going east.
               break
             end
             local L = pxs[Q] - px_P
             if L > scale then break end
             pair_checks = pair_checks + 1
-            local cand = build_axis_rect_candidate(P, Q, scale)
-            if cand then
-              candidates[#candidates + 1] = cand
+
+            -- Phase 1: smallest axis-rect on (P, Q).
+            local c1 = build_axis_rect_candidate(P, Q, scale)
+            if c1 then
+              local w = c1.bxmax - c1.bxmin
+              local h = c1.bymax - c1.bymin
+              if w > prev_scale or h > prev_scale then
+                candidates[#candidates + 1] = c1
+              end
+            end
+
+            -- Phase 2: lens iterate. Search bbox is [P.x − L/2, P.x + L/2] ×
+            -- [P.y + L·√3/2, P.y + scale]. Each X in there with the precise
+            -- lens condition is a third-corner candidate; the 4th corner Y is
+            -- at (X.x + L, X.y) via pos_to_idx (O(1)).
+            local half_L = L * 0.5
+            local lens_x_min = px_P - half_L
+            local lens_x_max = px_P + half_L
+            local lens_y_min = py_P + L * SQRT3_2
+            local lens_y_max = py_P + scale
+            if lens_y_min <= lens_y_max then
+              local cx_min = mfloor(lens_x_min / cell_size)
+              local cx_max = mfloor(lens_x_max / cell_size)
+              local cy_min = mfloor(lens_y_min / cell_size)
+              local cy_max = mfloor(lens_y_max / cell_size)
+              for cx = cx_min, cx_max do
+                local row_p = point_bucket[cx]
+                if row_p then
+                  for cy = cy_min, cy_max do
+                    local cell = row_p[cy]
+                    if cell then
+                      for ki = 1, #cell do
+                        local X = cell[ki]
+                        if not pole_dead[X] and X ~= P and X ~= Q then
+                          p2_x_checks = p2_x_checks + 1
+                          local x_X = pxs[X]
+                          local y_X = pys[X]
+                          local αx = x_X - px_P
+                          local βy = y_X - py_P
+                          if mabs(αx) <= half_L + EPS_GEOM
+                             and βy >= L * SQRT3_2 - EPS_GEOM
+                             and βy <= scale + EPS_GEOM then
+                            p2_lens_pass = p2_lens_pass + 1
+                            p2_y_lookups = p2_y_lookups + 1
+                            local c2 = build_phase2_candidate(P, Q, X)
+                            if c2 then
+                              local w = c2.bxmax - c2.bxmin
+                              local h = c2.bymax - c2.bymin
+                              if w > prev_scale or h > prev_scale then
+                                candidates[#candidates + 1] = c2
+                              end
+                            end
+                          end
+                        end
+                      end
+                    end
+                  end
+                end
+              end
             end
           end
         end
@@ -767,28 +909,29 @@ function M.compute(points, reaches, opts)
 
   local accepted_parls = {}
 
-  -- All phase 1 candidates are axis-rects (phase 0). Sort by area asc,
-  -- accept by SAT non-overlap with containment override against the
-  -- cumulative primary + expansion lists.
-  local function detect_for_scale(candidates)
+  -- v21 phase-priority dispatch: split candidates by phase, sort each phase
+  -- by area asc, then process phase 0 → 1 → 2 → 3. Within each phase, accept
+  -- via SAT non-overlap (with containment override) against cumulative
+  -- primary + expansion. Mirrors v20's detect_phased_for_scale.
+  local function detect_phased_for_scale(candidates)
     if #candidates == 0 then return end
-    table.sort(candidates, function(a, b) return a.area < b.area end)
+    local phases = { {}, {}, {}, {} }
     for _, P in ipairs(candidates) do
-      local p_key = quad_key(P.corners)
-      if not all_seen[p_key] then
-        local conflict = false
-        local p_bxmin, p_bxmax = P.bxmin, P.bxmax
-        local p_bymin, p_bymax = P.bymin, P.bymax
-        for _, Q in ipairs(primary_parls) do
-          if p_bxmin <= Q.bxmax and p_bxmax >= Q.bxmin
-             and p_bymin <= Q.bymax and p_bymax >= Q.bymin then
-            if quads_overlap(P.corners, Q.corners) and not parl_contains_parl(P, Q) then
-              conflict = true; break
-            end
-          end
-        end
-        if not conflict then
-          for _, Q in ipairs(expansion_parls) do
+      local ph = parl_phase(P) + 1
+      phases[ph][#phases[ph] + 1] = P
+    end
+    for ph = 1, 4 do
+      table.sort(phases[ph], function(a, b) return a.area < b.area end)
+    end
+
+    for ph = 1, 4 do
+      for _, P in ipairs(phases[ph]) do
+        local p_key = quad_key(P.corners)
+        if not all_seen[p_key] then
+          local conflict = false
+          local p_bxmin, p_bxmax = P.bxmin, P.bxmax
+          local p_bymin, p_bymax = P.bymin, P.bymax
+          for _, Q in ipairs(primary_parls) do
             if p_bxmin <= Q.bxmax and p_bxmax >= Q.bxmin
                and p_bymin <= Q.bymax and p_bymax >= Q.bymin then
               if quads_overlap(P.corners, Q.corners) and not parl_contains_parl(P, Q) then
@@ -796,17 +939,27 @@ function M.compute(points, reaches, opts)
               end
             end
           end
-        end
-        if not conflict then
-          primary_parls[#primary_parls + 1] = P
-          all_seen[p_key] = true
-          mark_dead_in_parl(P)
-          for _, E in ipairs(expand_parl(P)) do
-            local k = quad_key(E.corners)
-            if not all_seen[k] then
-              all_seen[k] = true
-              expansion_parls[#expansion_parls + 1] = E
-              mark_dead_in_parl(E)
+          if not conflict then
+            for _, Q in ipairs(expansion_parls) do
+              if p_bxmin <= Q.bxmax and p_bxmax >= Q.bxmin
+                 and p_bymin <= Q.bymax and p_bymax >= Q.bymin then
+                if quads_overlap(P.corners, Q.corners) and not parl_contains_parl(P, Q) then
+                  conflict = true; break
+                end
+              end
+            end
+          end
+          if not conflict then
+            primary_parls[#primary_parls + 1] = P
+            all_seen[p_key] = true
+            mark_dead_in_parl(P)
+            for _, E in ipairs(expand_parl(P)) do
+              local k = quad_key(E.corners)
+              if not all_seen[k] then
+                all_seen[k] = true
+                expansion_parls[#expansion_parls + 1] = E
+                mark_dead_in_parl(E)
+              end
             end
           end
         end
@@ -819,12 +972,16 @@ function M.compute(points, reaches, opts)
   stats.scale_dead_after = {}
   for s_idx = 1, #SCALES do
     local scale = SCALES[s_idx]
-    local candidates = enumerate_axis_rects_phase1(scale)
+    local prev_scale = s_idx > 1 and SCALES[s_idx - 1] or 0
+    local candidates = enumerate_for_scale(scale, prev_scale)
     stats.scale_candidates[s_idx] = #candidates
-    detect_for_scale(candidates)
+    detect_phased_for_scale(candidates)
     stats.scale_dead_after[s_idx] = dead_count
   end
   stats.t_scale_total.stop()
+  stats.p2_x_checks = p2_x_checks
+  stats.p2_lens_pass = p2_lens_pass
+  stats.p2_y_lookups = p2_y_lookups
 
   for _, P in ipairs(primary_parls) do
     accepted_parls[#accepted_parls + 1] = P

@@ -165,6 +165,10 @@ function M.run(player_index, entities)
       v21_stats.chain_calls or 0, v21_stats.chain_success or 0,
       v21_stats.dead_count or 0))
     player.print(string.format(
+      "    p2 x_checks=%d  lens_pass=%d  y_lookups=%d",
+      v21_stats.p2_x_checks or 0, v21_stats.p2_lens_pass or 0,
+      v21_stats.p2_y_lookups or 0))
+    player.print(string.format(
       "    cache hits=%d misses=%d",
       v21_stats.cache_hits or 0, v21_stats.cache_misses or 0))
     player.print({"",
