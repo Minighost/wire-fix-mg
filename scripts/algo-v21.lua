@@ -42,6 +42,7 @@ local ROUND_SCALE = 10000
 -- is covered so isolated big primaries (no smaller cousin to seed expansion)
 -- are still detected.
 local SQRT3_2 = 0.86602540378443864676  -- √3/2, phase 2 lens β bound coefficient
+local SQRT3   = 1.73205080756887729353  -- √3, phase 2/3/4 cone test coefficient
 local mfloor = math.floor
 local mabs = math.abs
 local msqrt = math.sqrt
@@ -300,6 +301,24 @@ function M.compute(points, reaches, opts)
           if #line.poles >= 2 then
             diag_lines[#diag_lines + 1] = line
           end
+        end
+      end
+    end
+  end
+
+  -- Reverse index: lines_through[pole_idx] = list of line objects whose
+  -- poles[] sequence contains this pole. Used by the line-based X search
+  -- in phase 2/3/4: for a given anchor P, only lines that go through P
+  -- can possibly host a chain-reachable third corner.
+  local lines_through = {}
+  for _, row_a in pairs(lines) do
+    for _, row_b in pairs(row_a) do
+      for _, line in pairs(row_b) do
+        for ki = 1, #line.poles do
+          local p = line.poles[ki]
+          local list = lines_through[p]
+          if not list then list = {}; lines_through[p] = list end
+          list[#list + 1] = line
         end
       end
     end
@@ -863,46 +882,49 @@ function M.compute(points, reaches, opts)
               end
             end
 
-            -- Phase 2: lens iterate. Search bbox is [P.x − L/2, P.x + L/2] ×
-            -- [P.y + L·√3/2, P.y + scale]. Each X in there with the precise
-            -- lens condition is a third-corner candidate; the 4th corner Y is
-            -- at (X.x + L, X.y) via pos_to_idx (O(1)).
+            -- Phase 2: line-based X enumeration. For each line through P
+            -- whose direction sits in the lens cone (|ndx|·√3 ≤ |ndy|, ndy ≠ 0),
+            -- walk its alive collinear poles toward β > 0 until off_y > scale
+            -- or a dead pole. This restricts X to chain-reachable poles, so
+            -- chain validation downstream rarely fails.
             local half_L = L * 0.5
-            local lens_x_min = px_P - half_L
-            local lens_x_max = px_P + half_L
-            local lens_y_min = py_P + L * SQRT3_2
-            local lens_y_max = py_P + scale
-            if lens_y_min <= lens_y_max then
-              local cx_min = mfloor(lens_x_min / cell_size)
-              local cx_max = mfloor(lens_x_max / cell_size)
-              local cy_min = mfloor(lens_y_min / cell_size)
-              local cy_max = mfloor(lens_y_max / cell_size)
-              for cx = cx_min, cx_max do
-                local row_p = point_bucket[cx]
-                if row_p then
-                  for cy = cy_min, cy_max do
-                    local cell = row_p[cy]
-                    if cell then
-                      for ki = 1, #cell do
-                        local X = cell[ki]
-                        if not pole_dead[X] and X ~= P and X ~= Q then
-                          p2_x_checks = p2_x_checks + 1
-                          local x_X = pxs[X]
-                          local y_X = pys[X]
-                          local off_x = x_X - px_P  -- = α in lens spec
-                          local off_y = y_X - py_P  -- = β in lens spec
-                          if mabs(off_x) <= half_L + EPS_GEOM
-                             and off_y >= L * SQRT3_2 - EPS_GEOM
-                             and off_y <= scale + EPS_GEOM then
-                            p2_lens_pass = p2_lens_pass + 1
-                            p2_y_lookups = p2_y_lookups + 1
-                            local c2 = build_phase2_candidate(P, Q, X)
-                            if c2 then
-                              local w = c2.bxmax - c2.bxmin
-                              local h = c2.bymax - c2.bymin
-                              if w > prev_scale or h > prev_scale then
-                                candidates[#candidates + 1] = c2
-                              end
+            local L_s32 = L * SQRT3_2
+            local lines_at_P = lines_through[P]
+            if lines_at_P then
+              for li = 1, #lines_at_P do
+                local line = lines_at_P[li]
+                local ndy = line.ndy
+                if ndy ~= 0 then
+                  local ndx = line.ndx
+                  local abs_ndx = ndx >= 0 and ndx or -ndx
+                  local abs_ndy = ndy >= 0 and ndy or -ndy
+                  if abs_ndx * SQRT3 <= abs_ndy + EPS then
+                    local poles = line.poles
+                    local pos_P = line.pos_in_line[P]
+                    local k_start, k_end, k_step
+                    if ndy > 0 then
+                      k_start = pos_P + 1; k_end = #poles; k_step = 1
+                    else
+                      k_start = pos_P - 1; k_end = 1;       k_step = -1
+                    end
+                    for k = k_start, k_end, k_step do
+                      local X = poles[k]
+                      if pole_dead[X] then break end
+                      local off_y = pys[X] - py_P
+                      if off_y > scale + EPS_GEOM then break end
+                      if X ~= Q then
+                        p2_x_checks = p2_x_checks + 1
+                        local off_x = pxs[X] - px_P
+                        if mabs(off_x) <= half_L + EPS_GEOM
+                           and off_y >= L_s32 - EPS_GEOM then
+                          p2_lens_pass = p2_lens_pass + 1
+                          p2_y_lookups = p2_y_lookups + 1
+                          local c2 = build_phase2_candidate(P, Q, X)
+                          if c2 then
+                            local w = c2.bxmax - c2.bxmin
+                            local h = c2.bymax - c2.bymin
+                            if w > prev_scale or h > prev_scale then
+                              candidates[#candidates + 1] = c2
                             end
                           end
                         end
@@ -935,42 +957,47 @@ function M.compute(points, reaches, opts)
             if Lp > scale then break end
             pair_checks = pair_checks + 1
 
+            -- Phase 3: line-based X enumeration. xy-mirror of phase 2's cone.
+            -- Lens cone direction: |ndy|·√3 ≤ |ndx|, ndx ≠ 0. Walk lines
+            -- through P toward α > 0 (right of P in xy).
             local half_Lp = Lp * 0.5
-            local lens_x_min = px_P + Lp * SQRT3_2
-            local lens_x_max = px_P + scale
-            local lens_y_min = py_P - half_Lp
-            local lens_y_max = py_P + half_Lp
-            if lens_x_min <= lens_x_max then
-              local cx_min = mfloor(lens_x_min / cell_size)
-              local cx_max = mfloor(lens_x_max / cell_size)
-              local cy_min = mfloor(lens_y_min / cell_size)
-              local cy_max = mfloor(lens_y_max / cell_size)
-              for cx = cx_min, cx_max do
-                local row_p = point_bucket[cx]
-                if row_p then
-                  for cy = cy_min, cy_max do
-                    local cell = row_p[cy]
-                    if cell then
-                      for ki = 1, #cell do
-                        local X = cell[ki]
-                        if not pole_dead[X] and X ~= P and X ~= Q then
-                          p2_x_checks = p2_x_checks + 1
-                          local x_X = pxs[X]
-                          local y_X = pys[X]
-                          local off_x = x_X - px_P  -- = α
-                          local off_y = y_X - py_P  -- = β
-                          if off_x >= Lp * SQRT3_2 - EPS_GEOM
-                             and off_x <= scale + EPS_GEOM
-                             and mabs(off_y) <= half_Lp + EPS_GEOM then
-                            p2_lens_pass = p2_lens_pass + 1
-                            p2_y_lookups = p2_y_lookups + 1
-                            local c3 = build_phase3_candidate(P, Q, X)
-                            if c3 then
-                              local w = c3.bxmax - c3.bxmin
-                              local h = c3.bymax - c3.bymin
-                              if w > prev_scale or h > prev_scale then
-                                candidates[#candidates + 1] = c3
-                              end
+            local Lp_s32 = Lp * SQRT3_2
+            local lines_at_P = lines_through[P]
+            if lines_at_P then
+              for li = 1, #lines_at_P do
+                local line = lines_at_P[li]
+                local ndx = line.ndx
+                if ndx ~= 0 then
+                  local ndy = line.ndy
+                  local abs_ndx = ndx >= 0 and ndx or -ndx
+                  local abs_ndy = ndy >= 0 and ndy or -ndy
+                  if abs_ndy * SQRT3 <= abs_ndx + EPS then
+                    local poles = line.poles
+                    local pos_P = line.pos_in_line[P]
+                    local k_start, k_end, k_step
+                    if ndx > 0 then
+                      k_start = pos_P + 1; k_end = #poles; k_step = 1
+                    else
+                      k_start = pos_P - 1; k_end = 1;       k_step = -1
+                    end
+                    for k = k_start, k_end, k_step do
+                      local X = poles[k]
+                      if pole_dead[X] then break end
+                      local off_x = pxs[X] - px_P
+                      if off_x > scale + EPS_GEOM then break end
+                      if X ~= Q then
+                        p2_x_checks = p2_x_checks + 1
+                        local off_y = pys[X] - py_P
+                        if off_x >= Lp_s32 - EPS_GEOM
+                           and mabs(off_y) <= half_Lp + EPS_GEOM then
+                          p2_lens_pass = p2_lens_pass + 1
+                          p2_y_lookups = p2_y_lookups + 1
+                          local c3 = build_phase3_candidate(P, Q, X)
+                          if c3 then
+                            local w = c3.bxmax - c3.bxmin
+                            local h = c3.bymax - c3.bymin
+                            if w > prev_scale or h > prev_scale then
+                              candidates[#candidates + 1] = c3
                             end
                           end
                         end
@@ -1016,45 +1043,44 @@ function M.compute(points, reaches, opts)
             local half_L = L * 0.5
             local L_s32 = L * SQRT3_2
 
-            -- Lens corners in (α, β) = {(±L/2, L·√3/2), (±L/2, scale)},
-            -- transformed to xy via P + α·d + β·d_perp.
-            local a1 = -half_L * dx + L_s32 * (-dy)
-            local a2 =  half_L * dx + L_s32 * (-dy)
-            local a3 =  half_L * dx + scale * (-dy)
-            local a4 = -half_L * dx + scale * (-dy)
-            local b1 = -half_L * dy + L_s32 * dx
-            local b2 =  half_L * dy + L_s32 * dx
-            local b3 =  half_L * dy + scale * dx
-            local b4 = -half_L * dy + scale * dx
-            local x_min = a1; if a2 < x_min then x_min = a2 end; if a3 < x_min then x_min = a3 end; if a4 < x_min then x_min = a4 end
-            local x_max = a1; if a2 > x_max then x_max = a2 end; if a3 > x_max then x_max = a3 end; if a4 > x_max then x_max = a4 end
-            local y_min = b1; if b2 < y_min then y_min = b2 end; if b3 < y_min then y_min = b3 end; if b4 < y_min then y_min = b4 end
-            local y_max = b1; if b2 > y_max then y_max = b2 end; if b3 > y_max then y_max = b3 end; if b4 > y_max then y_max = b4 end
-            x_min = x_min + px_P; x_max = x_max + px_P
-            y_min = y_min + py_P; y_max = y_max + py_P
-
-            local cx_min = mfloor(x_min / cell_size)
-            local cx_max = mfloor(x_max / cell_size)
-            local cy_min = mfloor(y_min / cell_size)
-            local cy_max = mfloor(y_max / cell_size)
-            for cx = cx_min, cx_max do
-              local row_p = point_bucket[cx]
-              if row_p then
-                for cy = cy_min, cy_max do
-                  local cell = row_p[cy]
-                  if cell then
-                    for ki = 1, #cell do
-                      local X = cell[ki]
-                      if not pole_dead[X] and X ~= P and X ~= Q then
+            -- Phase 4: line-based X enumeration in the rotated (α, β) frame.
+            -- Per line through P, project its direction onto (d, d_perp);
+            -- a line is in lens cone iff its β-component is non-zero AND
+            -- |α-component|·√3 ≤ |β-component|. Walk in the direction with
+            -- positive β projection.
+            local lines_at_P = lines_through[P]
+            if lines_at_P then
+              for li = 1, #lines_at_P do
+                local line = lines_at_P[li]
+                local ndx_l = line.ndx
+                local ndy_l = line.ndy
+                -- Projections of (ndx_l, ndy_l) onto (d, d_perp).
+                local alpha_dir =  ndx_l * dx + ndy_l * dy
+                local beta_dir  = -ndx_l * dy + ndy_l * dx
+                if beta_dir ~= 0 then
+                  local abs_a = alpha_dir >= 0 and alpha_dir or -alpha_dir
+                  local abs_b = beta_dir  >= 0 and beta_dir  or -beta_dir
+                  if abs_a * SQRT3 <= abs_b + EPS then
+                    local poles = line.poles
+                    local pos_P = line.pos_in_line[P]
+                    local k_start, k_end, k_step
+                    if beta_dir > 0 then
+                      k_start = pos_P + 1; k_end = #poles; k_step = 1
+                    else
+                      k_start = pos_P - 1; k_end = 1;       k_step = -1
+                    end
+                    for k = k_start, k_end, k_step do
+                      local X = poles[k]
+                      if pole_dead[X] then break end
+                      local vx = pxs[X] - px_P
+                      local vy = pys[X] - py_P
+                      local beta = -vx * dy + vy * dx
+                      if beta > scale + EPS_GEOM then break end
+                      if X ~= Q then
                         p2_x_checks = p2_x_checks + 1
-                        local vx = pxs[X] - px_P
-                        local vy = pys[X] - py_P
-                        -- Project onto rotated frame.
                         local alpha = vx * dx + vy * dy
-                        local beta  = -vx * dy + vy * dx
                         if mabs(alpha) <= half_L + EPS_GEOM
-                           and beta >= L_s32 - EPS_GEOM
-                           and beta <= scale + EPS_GEOM then
+                           and beta >= L_s32 - EPS_GEOM then
                           p2_lens_pass = p2_lens_pass + 1
                           p2_y_lookups = p2_y_lookups + 1
                           local c4 = build_phase4_candidate(P, Q, X)
