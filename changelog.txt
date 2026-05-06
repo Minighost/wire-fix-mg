@@ -2,26 +2,14 @@
 Version: 0.2.0
 Date: 2026-05-06
   Changes:
-    - Algorithm rewritten: pattern detection (rectangles, parallelograms,
-      isosceles triangles) followed by MST closure. The previous MST + cascade
-      approach is gone — no more cascading wires.
-    - Output is now deterministic. Identical layouts always produce identical
-      results, regardless of pole placement order. (Previously results varied
-      with creation order.)
+    - Algorithm rewritten: pattern detection (rectangles, parallelograms, isosceles triangles) followed by MST closure. The previous MST + cascade approach is gone — no more cascading wires.
+    - Output is now deterministic. Identical layouts always produce identical results, regardless of pole placement order. (Previously results varied with creation order.)
     - No more visually overlapping parallel wires.
+    - Click bindings reworked. Left-click preserves existing network separation (won't merge groups); Shift + left-click ignores network separation (the old left-click behavior — merges everything into one network); right-click removes all internal copper wires.
   Features:
-    - Per-player setting "Max grid size" (32–8192, default 128). Larger values
-      detect larger patterns at the cost of compute time. Replaces the previous
-      max-connections-per-pole setting.
-    - Per-player setting "Include electric pole ghosts" (default on). Apply
-      to ghosts as well as built poles. Disable to skip ghost poles.
-    - Click bindings reworked:
-      - Left-click: preserves existing network separation (won't merge groups)
-      - Shift + left-click: ignores network separation (the old left-click
-        behavior — merges everything into one network)
-      - Right-click: removes all internal copper wires
-    - Tool tooltip notes how to raise the max grid size from Mod settings →
-      Per player when large patterns aren't detected.
+    - Per-player setting "Max grid size" (32–8192, default 128). Larger values detect larger patterns at the cost of compute time. Replaces the previous max-connections-per-pole setting.
+    - Per-player setting "Include electric pole ghosts" (default on). Apply to ghosts as well as built poles. Disable to skip ghost poles.
+    - Tool tooltip notes how to raise the max grid size from Mod settings → Per player when large patterns aren't detected.
 ---------------------------------------------------------------------------------------------------
 Version: 0.1.0
 Date: 2026-04-30
