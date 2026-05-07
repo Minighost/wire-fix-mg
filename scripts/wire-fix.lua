@@ -133,10 +133,55 @@ function M.run(player_index, entities, opts)
     points[i] = { x = p.position.x, y = p.position.y }
     reaches[i] = pole_proto(p).get_max_wire_distance(p.quality)
   end
-  local v21_edges, v21_parls, v21_iso, v21_stats = algo.compute(points, reaches, {
+
+  local algo_opts = {
     skip_chain_block = config.measure_skip_chain,
     max_grid = max_grid,
-  })
+  }
+
+  local v21_edges
+  local v21_parls, v21_iso, v21_stats
+
+  if cross_network then
+    v21_edges, v21_parls, v21_iso, v21_stats = algo.compute(points, reaches, algo_opts)
+  else
+    -- Partition input by internal-UF component and run algo per component.
+    -- Each call sees only its own component's poles, so cross-component
+    -- shortcuts (in MST or pattern detection) cannot occur — the cross_network
+    -- promise is enforced at input time, not by post-filtering.
+    local groups = {}
+    for i = 1, n do
+      local root = uf_find(uf, i)
+      groups[root] = groups[root] or {}
+      groups[root][#groups[root] + 1] = i
+    end
+
+    v21_edges = {}
+    v21_parls = {}
+    v21_iso = {}
+    v21_stats = {}
+
+    for _, member in pairs(groups) do
+      if #member >= 2 then
+        local sub_points = {}
+        local sub_reaches = {}
+        for k, gi in ipairs(member) do
+          sub_points[k] = points[gi]
+          sub_reaches[k] = reaches[gi]
+        end
+
+        local sub_edges, sub_parls, sub_iso, sub_stats =
+          algo.compute(sub_points, sub_reaches, algo_opts)
+
+        for _, e in ipairs(sub_edges) do
+          v21_edges[#v21_edges + 1] = { member[e[1]], member[e[2]] }
+        end
+        for _, p in ipairs(sub_parls or {}) do v21_parls[#v21_parls + 1] = p end
+        for _, t in ipairs(sub_iso or {}) do v21_iso[#v21_iso + 1] = t end
+        if not next(v21_stats) then v21_stats = sub_stats or {} end
+      end
+    end
+  end
   p_v21.stop()
 
   -- Phase 3: build wanted set, filtered by network preservation.
