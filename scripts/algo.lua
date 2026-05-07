@@ -1413,6 +1413,20 @@ function M.compute(points, reaches, opts)
   end
   stats.t_mst_closure.stop()
 
+  -- Relaxation pass: any candidate that still bridges two distinct components
+  -- after the checked pass is the only available wire-distance-valid bridge.
+  -- Force-add it via unchecked, accepting a visual crossing rather than
+  -- leaving reachable poles in separate networks.
+  stats.t_mst_relax = game.create_profiler()
+  stats.mst_relax_count = 0
+  for _, e in ipairs(mst_candidates) do
+    if find(e.i) ~= find(e.j) then
+      add_edge_unchecked(e.i, e.j)
+      stats.mst_relax_count = stats.mst_relax_count + 1
+    end
+  end
+  stats.t_mst_relax.stop()
+
   return edges, accepted_parls, accepted_iso_refl_tris, stats
 end
 

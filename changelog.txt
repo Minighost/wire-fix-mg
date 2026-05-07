@@ -1,3 +1,12 @@
+Version: 미출시
+Date: 미출시
+  - Slight tooltip phrasing improvement.
+  - Mod description updated to reflect pattern-aware behavior.
+---------------------------------------------------------------------------------------------------
+Version: 0.2.1
+Date: 2026-05-06
+  Bugfixes:
+    - MST no longer leaves reachable poles in separate networks when the only valid bridge edge would visually cross a smaller already-accepted edge. A relaxation pass now force-adds such bridges after the regular intersection-checked pass.
 ---------------------------------------------------------------------------------------------------
 Version: 0.2.0
 Date: 2026-05-06
