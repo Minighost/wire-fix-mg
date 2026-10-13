@@ -1,3 +1,9 @@
+# wire-fix-mg
+
+Fork of Chalgaro46/wire-fix. All credits for the original mod go to Chalgaro46. I'm just updating the mod for 2.1.
+
+Original README contents below:
+
 # Wire Fix
 
 A small Factorio 2.0 utility mod that tidies copper wire connections between electric poles in a selected area.

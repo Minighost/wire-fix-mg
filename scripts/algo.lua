@@ -68,7 +68,7 @@ function M.compute(points, reaches, opts)
     pys[i] = points[i].y
   end
 
-  stats.t_setup = game.create_profiler()
+  stats.t_setup = helpers.create_profiler()
 
   local pos_to_idx = {}
   for i = 1, n do
@@ -1310,7 +1310,7 @@ function M.compute(points, reaches, opts)
     end
   end
 
-  stats.t_scale_total = game.create_profiler()
+  stats.t_scale_total = helpers.create_profiler()
   stats.scale_candidates = {}
   stats.scale_dead_after = {}
   for s_idx = 1, #SCALES do
@@ -1344,7 +1344,7 @@ function M.compute(points, reaches, opts)
   stats.chain_success = chain_success
   stats.dead_count = dead_count
 
-  stats.t_iso = game.create_profiler()
+  stats.t_iso = helpers.create_profiler()
   for _, P in ipairs(primary_parls) do try_iso_emit(P) end
   for _, P in ipairs(expansion_parls) do try_iso_emit(P) end
   stats.t_iso.stop()
@@ -1356,7 +1356,7 @@ function M.compute(points, reaches, opts)
   -- Parl chain edges are already in edge_bucket / edges (added by
   -- add_parl_edges during accept). Only iso reflection tris need adding,
   -- with intersection check vs the planar parl edge graph.
-  stats.t_pattern_edges = game.create_profiler()
+  stats.t_pattern_edges = helpers.create_profiler()
   for _, T in ipairs(accepted_iso_refl_tris) do
     local sa, sb, x = T[1], T[2], T[3]
     add_edge_checked(sa, sb)
@@ -1365,7 +1365,7 @@ function M.compute(points, reaches, opts)
   end
   stats.t_pattern_edges.stop()
 
-  stats.t_mst_cand = game.create_profiler()
+  stats.t_mst_cand = helpers.create_profiler()
   local mst_candidates = {}
   for i = 1, n do
     local pi = points[i]
@@ -1405,7 +1405,7 @@ function M.compute(points, reaches, opts)
   stats.mst_cand_count = #mst_candidates
   stats.t_mst_cand.stop()
 
-  stats.t_mst_closure = game.create_profiler()
+  stats.t_mst_closure = helpers.create_profiler()
   for _, e in ipairs(mst_candidates) do
     if find(e.i) ~= find(e.j) then
       add_edge_checked(e.i, e.j)
@@ -1417,7 +1417,7 @@ function M.compute(points, reaches, opts)
   -- after the checked pass is the only available wire-distance-valid bridge.
   -- Force-add it via unchecked, accepting a visual crossing rather than
   -- leaving reachable poles in separate networks.
-  stats.t_mst_relax = game.create_profiler()
+  stats.t_mst_relax = helpers.create_profiler()
   stats.mst_relax_count = 0
   for _, e in ipairs(mst_candidates) do
     if find(e.i) ~= find(e.j) then
