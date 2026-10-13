@@ -2,6 +2,10 @@
 
 Fork of Chalgaro46/wire-fix. All credits for the original mod go to Chalgaro46. I'm just updating the mod for 2.1.
 
+Build using: `git archive --format=zip --prefix="wire-fix-mg_0.3.0/" -o "dist/wire-fix-mg_0.3.0.zip" HEAD`
+
+...and change the version number accordingly.
+
 Original README contents below:
 
 # Wire Fix
