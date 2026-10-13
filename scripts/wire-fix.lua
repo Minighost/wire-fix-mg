@@ -80,10 +80,10 @@ function M.run(player_index, entities, opts)
     return
   end
 
-  local p_total = game.create_profiler()
+  local p_total = helpers.create_profiler()
 
   -- Phase 1: classify existing internal connections.
-  local p_phase1 = game.create_profiler()
+  local p_phase1 = helpers.create_profiler()
   local pole_set = {}
   local index_of = {}
   for i = 1, n do
@@ -125,7 +125,7 @@ function M.run(player_index, entities, opts)
   end
 
   -- Phase 2: pattern-aware layout (algo v21).
-  local p_v21 = game.create_profiler()
+  local p_v21 = helpers.create_profiler()
   local points = {}
   local reaches = {}
   for i = 1, n do
@@ -203,7 +203,7 @@ function M.run(player_index, entities, opts)
   end
 
   -- Phase 4: diff-apply. Edges in both internal_pairs and wanted stay untouched.
-  local p_diff = game.create_profiler()
+  local p_diff = helpers.create_profiler()
   local disconnect_calls, connect_calls = 0, 0
 
   for k, pair in pairs(internal_pairs) do
